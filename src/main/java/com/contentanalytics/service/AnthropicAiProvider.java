@@ -1,24 +1,31 @@
 package com.contentanalytics.service;
 
-import com.contentanalytics.service.DocumentAnalysisResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Anthropic Claude implementation of {@link AiProvider}.
+ * <p>
+ * Kept as an alternative backend. Claude has no free tier, so it is only selected when
+ * {@code app.ai.provider=anthropic} and an API key is supplied.
+ */
 @Service
-@RequiredArgsConstructor
 @Slf4j
-public class AnthropicService {
+public class AnthropicAiProvider implements AiProvider {
 
-    @Value("${app.anthropic.api-key}")
+    @Value("${app.ai.provider:gemini}")
+    private String configuredProvider;
+
+    @Value("${app.anthropic.api-key:}")
     private String apiKey;
 
     @Value("${app.anthropic.api-url:https://api.anthropic.com/v1}")
@@ -30,40 +37,43 @@ public class AnthropicService {
     @Value("${app.anthropic.max-tokens:2048}")
     private int maxTokens;
 
-    private final OkHttpClient httpClient = new OkHttpClient();
+    private final OkHttpClient httpClient = new OkHttpClient.Builder()
+            .callTimeout(Duration.ofSeconds(30))
+            .build();
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    /**
-     * Analyze document with Claude API
-     */
+    @Override
+    public String getName() {
+        return "anthropic";
+    }
+
+    @Override
+    public boolean isAvailable() {
+        return "anthropic".equalsIgnoreCase(configuredProvider)
+                && apiKey != null && !apiKey.isBlank();
+    }
+
+    @Override
     public DocumentAnalysisResult analyzeDocument(String documentText) {
-        log.info("Analyzing document with Claude API (text length: {} chars)", documentText.length());
+        if (!isAvailable()) {
+            log.info("Anthropic provider not available (provider={}, keyPresent={})",
+                    configuredProvider, apiKey != null && !apiKey.isBlank());
+            return null;
+        }
 
         try {
-            // Prepare analysis prompt
             String prompt = buildAnalysisPrompt(documentText);
-
-            // Call Claude API
             String response = callClaudeAPI(prompt);
-
-            // Parse response
-            DocumentAnalysisResult result = parseAnalysisResponse(response);
-
-            log.info("Document analysis complete. Summary length: {}", result.getSummary().length());
-
-            return result;
-
+            return parseAnalysisResponse(response);
         } catch (Exception e) {
             log.error("Error analyzing document with Claude API", e);
-            throw new RuntimeException("Failed to analyze document", e);
+            return null;
         }
     }
 
-    /**
-     * Build analysis prompt for Claude
-     */
     private String buildAnalysisPrompt(String documentText) {
-        // Truncate very long documents
+
         String truncatedText = documentText;
         if (documentText.length() > 10000) {
             truncatedText = documentText.substring(0, 10000) + "...[truncated]";
@@ -94,13 +104,10 @@ public class AnthropicService {
             """;
     }
 
-    /**
-     * Call Claude API
-     */
     private String callClaudeAPI(String prompt) throws IOException {
+
         log.debug("Calling Claude API with model: {}", model);
 
-        // Build request body
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", model);
         requestBody.put("max_tokens", maxTokens);
@@ -113,8 +120,10 @@ public class AnthropicService {
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
 
-        // Build HTTP request
-        RequestBody body = RequestBody.create(jsonBody, MediaType.get("application/json"));
+        RequestBody body = RequestBody.create(
+                jsonBody,
+                MediaType.parse("application/json") // FIX 2 (new OkHttp compatible)
+        );
 
         Request request = new Request.Builder()
                 .url(apiUrl + "/messages")
@@ -124,8 +133,8 @@ public class AnthropicService {
                 .post(body)
                 .build();
 
-        // Execute request
         try (Response response = httpClient.newCall(request).execute()) {
+
             if (!response.isSuccessful()) {
                 String errorBody = response.body() != null ? response.body().string() : "Unknown error";
                 log.error("Claude API error: {} - {}", response.code(), errorBody);
@@ -133,20 +142,18 @@ public class AnthropicService {
             }
 
             String responseBody = response.body().string();
-            log.debug("Claude API response received (length: {} chars)", responseBody.length());
 
-            // Extract text from response
             return extractTextFromResponse(responseBody);
         }
     }
 
-    /**
-     * Extract text content from Claude API response
-     */
     private String extractTextFromResponse(String responseJson) throws IOException {
+
         Map<String, Object> response = objectMapper.readValue(responseJson, Map.class);
 
-        List<Map<String, Object>> content = (List<Map<String, Object>>) response.get("content");
+        List<Map<String, Object>> content =
+                (List<Map<String, Object>>) response.get("content");
+
         if (content == null || content.isEmpty()) {
             throw new RuntimeException("No content in Claude API response");
         }
@@ -154,38 +161,37 @@ public class AnthropicService {
         return (String) content.get(0).get("text");
     }
 
-    /**
-     * Parse Claude API response into DocumentAnalysisResult
-     */
     private DocumentAnalysisResult parseAnalysisResponse(String response) {
+
         try {
-            // Extract JSON from response (handle markdown code blocks)
             String jsonContent = response;
-            if (response.contains("```json")) {
-                jsonContent = response.substring(
-                        response.indexOf("```json") + 7,
-                        response.lastIndexOf("```")
-                ).trim();
-            } else if (response.contains("```")) {
-                jsonContent = response.substring(
-                        response.indexOf("```") + 3,
-                        response.lastIndexOf("```")
-                ).trim();
+
+            // FIX 3: safer JSON extraction
+            Pattern pattern = Pattern.compile("\\{.*\\}", Pattern.DOTALL);
+            Matcher matcher = pattern.matcher(response);
+
+            if (matcher.find()) {
+                jsonContent = matcher.group();
             }
 
-            // Parse JSON
             Map<String, Object> parsed = objectMapper.readValue(jsonContent, Map.class);
+
+            Object score = parsed.get("confidenceScore");
+
+            float confidence = score != null
+                    ? ((Number) score).floatValue()
+                    : 0f;
 
             return DocumentAnalysisResult.builder()
                     .summary((String) parsed.get("summary"))
                     .keyTopics((String) parsed.get("keyTopics"))
                     .sentiment((String) parsed.get("sentiment"))
-                    .confidenceScore(((Number) parsed.get("confidenceScore")).floatValue())
+                    .confidenceScore(confidence)
                     .build();
 
         } catch (Exception e) {
             log.error("Error parsing Claude API response", e);
-            // Return default result on parse error
+
             return DocumentAnalysisResult.builder()
                     .summary("Analysis could not be completed")
                     .keyTopics("N/A")
@@ -194,5 +200,4 @@ public class AnthropicService {
                     .build();
         }
     }
-
 }

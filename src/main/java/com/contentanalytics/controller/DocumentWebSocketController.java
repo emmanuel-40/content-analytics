@@ -9,6 +9,8 @@ import org.springframework.messaging.handler.annotation.SendTo;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.stereotype.Controller;
 
+import java.util.UUID;
+
 @Controller
 @RequiredArgsConstructor
 @Slf4j
@@ -28,7 +30,7 @@ public class DocumentWebSocketController {
         log.debug("Received document tracking message: {}", message.getDocumentId());
 
         // Get user principal from WebSocket session
-        String userId = (String) headerAccessor.getSessionAttributes().get("userId");
+        UUID userId = (UUID) headerAccessor.getSessionAttributes().get("userId");
         message.setUserId(userId);
 
         // Add server timestamp

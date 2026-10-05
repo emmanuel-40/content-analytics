@@ -20,6 +20,13 @@ import java.time.Duration;
 @EnableCaching
 public class CacheConfig {
 
+    // Create ObjectMapper bean for JSON serialization
+
+    @Bean
+    public ObjectMapper objectMapper() {
+        return new ObjectMapper();
+    }
+
     @Bean
     public CacheManager cacheManager(RedisConnectionFactory connectionFactory,
                                      ObjectMapper objectMapper) {

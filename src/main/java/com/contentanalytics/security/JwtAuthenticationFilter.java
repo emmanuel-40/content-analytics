@@ -3,6 +3,7 @@ package com.contentanalytics.security;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +28,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final JwtTokenProvider tokenProvider;
     private static final String USER_ID_ATTRIBUTE = "userId";
     private static final String EMAIL_ATTRIBUTE = "email";
+    private static final String ACCESS_TOKEN_COOKIE = "accessToken";
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
@@ -69,14 +71,30 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     /**
-     * Extract JWT token from Authorization header
-     * Expected format: Bearer <token>
+     * Extract the JWT from the request.
+     * <p>
+     * Order of precedence:
+     * <ol>
+     *   <li>{@code Authorization: Bearer <token>} header - used by non-browser clients
+     *       (curl, mobile apps, service-to-service calls)</li>
+     *   <li>{@code accessToken} HTTP-only cookie - the primary mechanism for browsers,
+     *       because it cannot be read by injected JavaScript</li>
+     * </ol>
      */
     private String getJwtFromRequest(HttpServletRequest request) {
         String bearerToken = request.getHeader(HttpHeaders.AUTHORIZATION);
 
         if (bearerToken != null && bearerToken.startsWith("Bearer ")) {
             return bearerToken.substring(7);
+        }
+
+        if (request.getCookies() != null) {
+            for (Cookie cookie : request.getCookies()) {
+                if (ACCESS_TOKEN_COOKIE.equals(cookie.getName()) && cookie.getValue() != null
+                        && !cookie.getValue().isBlank()) {
+                    return cookie.getValue();
+                }
+            }
         }
 
         return null;

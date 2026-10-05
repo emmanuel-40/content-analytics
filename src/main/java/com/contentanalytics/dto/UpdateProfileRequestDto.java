@@ -21,7 +21,7 @@ public class UpdateProfileRequestDto {
     private String bio;
 
     @Size(max = 20, message = "Phone number must not exceed 20 characters")
-    @Pattern(regexp = "^[+]?[0-9]{1,20}$", message = "Invalid phone number format", allowBlank = true)
+    @Pattern(regexp = "^$|^[+]?[0-9]{1,20}$", message = "Invalid phone number format")
     private String phoneNumber;
 
     @Size(max = 100, message = "Location must not exceed 100 characters")
@@ -31,7 +31,10 @@ public class UpdateProfileRequestDto {
     private String timezone;
 
     @Size(max = 255, message = "Website must not exceed 255 characters")
-    @Pattern(regexp = "^(https?://)?([\\da-z\\.-]+)\\.([a-z\\.]{2,6})([/\\w \\.-]*)*/?$", message = "Invalid website URL", allowBlank = true)
+    @Pattern(
+            regexp = "^$|^(https?://)?([\\da-z\\.-]+)\\.([a-z\\.]{2,6})([/\\w \\.-]*)*/?$",
+            message = "Invalid website URL"
+    )
     private String website;
 
     @Size(max = 100, message = "Company must not exceed 100 characters")
@@ -43,5 +46,4 @@ public class UpdateProfileRequestDto {
     private Boolean emailNotifications;
 
     private Boolean publicProfile;
-
 }

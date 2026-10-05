@@ -8,6 +8,7 @@ import okhttp3.*;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -69,20 +70,24 @@ public class EmailService {
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("subject", subject);
 
-            Map<String, String> from = new HashMap<>();
-            from.put("email", fromAddress);
-            from.put("name", fromName);
-            requestBody.put("from", from);
+            Map<String, Object> sender = new HashMap<>();
+            sender.put("email", fromAddress);
+            sender.put("name", fromName);
+            requestBody.put("sender", sender);
 
             Map<String, Object> to = new HashMap<>();
             to.put("email", toEmail);
-            requestBody.put("to", new Object[]{to});
+
+            requestBody.put("to", List.of(to));
 
             requestBody.put("htmlContent", htmlContent);
 
             String jsonBody = objectMapper.writeValueAsString(requestBody);
 
-            RequestBody body = RequestBody.create(jsonBody, MediaType.get("application/json"));
+            RequestBody body = RequestBody.create(
+                    jsonBody,
+                    MediaType.get("application/json")
+            );
 
             Request request = new Request.Builder()
                     .url(brevoApiUrl + "/smtp/email")
@@ -92,6 +97,7 @@ public class EmailService {
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
+
                 if (!response.isSuccessful()) {
                     String errorBody = response.body() != null ? response.body().string() : "Unknown error";
                     log.error("Brevo API error: {} - {}", response.code(), errorBody);

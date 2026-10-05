@@ -6,6 +6,7 @@ import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Entity
 @Table(name = "user_profiles", indexes = {
@@ -20,7 +21,7 @@ public class UserProfile {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
-    private String id;
+    private UUID id;
 
     @OneToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false, unique = true)
@@ -58,7 +59,7 @@ public class UserProfile {
     @Column(nullable = false)
     private Boolean publicProfile; // Profile visible to others?
 
-    @Column(nullable = false)
+    @Column(nullable = false, name = "show_email_publicly")
     private Boolean showEmailPublically; // Hide email from others?
 
     // Statistics

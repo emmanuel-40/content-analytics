@@ -10,10 +10,10 @@ CREATE TABLE email_verification_tokens (
 );
 
 -- Create indexes
-CREATE INDEX idx_token ON email_verification_tokens(token);
-CREATE INDEX idx_user_id ON email_verification_tokens(user_id);
-CREATE INDEX idx_created_at ON email_verification_tokens(created_at);
-CREATE INDEX idx_expiry_date ON email_verification_tokens(expiry_date);
+CREATE INDEX IF NOT EXISTS idx_token ON email_verification_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_user_id ON email_verification_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_created_at ON email_verification_tokens(created_at);
+CREATE INDEX IF NOT EXISTS idx_expiry_date ON email_verification_tokens(expiry_date);
 
 -- Comment
 COMMENT ON TABLE email_verification_tokens IS 'Email verification tokens for new user registration';

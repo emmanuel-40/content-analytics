@@ -11,6 +11,7 @@ import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;
+import java.util.UUID;
 
 @Component
 @RequiredArgsConstructor
@@ -62,7 +63,7 @@ public class WebSocketInterceptor implements ChannelInterceptor {
 
             // Extract user info
             String username = jwtTokenProvider.getUsernameFromToken(token);
-            String userId = jwtTokenProvider.getUserIdFromToken(token);
+            UUID userId = jwtTokenProvider.getUserIdFromToken(token);
 
             // Store in session attributes
             accessor.getSessionAttributes().put("userId", userId);

@@ -3,6 +3,7 @@ package com.contentanalytics.controller;
 import com.contentanalytics.dto.*;
 import com.contentanalytics.entity.User;
 import com.contentanalytics.exception.InvalidTokenException;
+import com.contentanalytics.exception.UserAlreadyExistsException;
 import com.contentanalytics.exception.UserNotFoundException;
 import com.contentanalytics.service.AuthService;
 import com.contentanalytics.util.CookieUtil;
@@ -10,19 +11,20 @@ import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.web.bind.annotation.*;
-import com.contentanalytics.dto.VerifyEmailRequestDto;
-import com.contentanalytics.dto.ResendVerificationEmailRequestDto;
-import com.contentanalytics.dto.ForgotPasswordRequestDto;
-import com.contentanalytics.dto.ResetPasswordRequestDto;
-import com.contentanalytics.repository.EmailVerificationTokenRepository;
-import com.contentanalytics.repository.PasswordResetTokenRepository;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+
 import java.time.LocalDateTime;
 import java.util.Map;
+import com.contentanalytics.repository.EmailVerificationTokenRepository;
+import com.contentanalytics.repository.PasswordResetTokenRepository;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -34,47 +36,59 @@ public class AuthController {
     private final CookieUtil cookieUtil;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
     private final PasswordResetTokenRepository passwordResetTokenRepository;
+    @Value("${jwt.refresh-expiration-days:7}")
+    private int refreshExpirationDays;
 
     /**
      * POST /api/auth/register
      * Register a new user
-     *
-     * Request body:
-     * {
-     *   "username": "john_doe",
-     *   "email": "john@example.com",
-     *   "password": "SecurePass123!",
-     *   "firstName": "John",
-     *   "lastName": "Doe"
-     * }
      */
     @PostMapping("/register")
-    public ResponseEntity<TokenResponseDto> register(
-            @Valid @RequestBody RegisterRequestDto request,
-            HttpServletResponse response) {
+    public ResponseEntity<ApiResponse> register(
+            @Valid @RequestBody RegisterRequestDto request) {
 
         log.info("Register request for user: {}", request.getUsername());
 
-        // Register user and get tokens
-        TokenResponseDto tokenResponse = authService.register(request);
+        try {
+            authService.register(request);  // ← Returns void now
 
-        // Set refresh token in HTTP-only secure cookie
-        long refreshTokenExpirationSeconds = 7 * 24 * 60 * 60; // 7 days
-        cookieUtil.setRefreshTokenCookie(response, tokenResponse.getRefreshToken(), refreshTokenExpirationSeconds);
+            log.info("User registered successfully: {}", request.getUsername());
 
-        // Return 201 CREATED status
-        return ResponseEntity.status(HttpStatus.CREATED).body(tokenResponse);
+            return ResponseEntity.status(HttpStatus.CREATED)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.CREATED.value())
+                            .message("Registration successful! Check your email to verify your account before logging in.")
+                            .build());
+
+        } catch (UserAlreadyExistsException e) {
+            log.warn("Registration failed - user already exists: {}", request.getUsername());
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.CONFLICT.value())
+                            .message(e.getMessage())
+                            .build());
+
+        } catch (IllegalArgumentException e) {
+            log.warn("Registration validation error: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.BAD_REQUEST.value())
+                            .message(e.getMessage())
+                            .build());
+
+        } catch (Exception e) {
+            log.error("Unexpected error during registration", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.INTERNAL_SERVER_ERROR.value())
+                            .message("Registration failed")
+                            .build());
+        }
     }
 
     /**
      * POST /api/auth/login
      * Authenticate user and return tokens
-     *
-     * Request body:
-     * {
-     *   "username": "john_doe",
-     *   "password": "SecurePass123!"
-     * }
      */
     @PostMapping("/login")
     public ResponseEntity<TokenResponseDto> login(
@@ -83,15 +97,27 @@ public class AuthController {
 
         log.info("Login request for user: {}", request.getUsername());
 
-        // Authenticate user and get tokens
-        TokenResponseDto tokenResponse = authService.login(request);
+        try {
+            TokenResponseDto tokenResponse = authService.login(request);
 
-        // Set refresh token in HTTP-only secure cookie
-        long refreshTokenExpirationSeconds = 7 * 24 * 60 * 60; // 7 days
-        cookieUtil.setRefreshTokenCookie(response, tokenResponse.getRefreshToken(), refreshTokenExpirationSeconds);
+            // Tokens are delivered via HTTP-only cookies so browser JavaScript (and therefore
+            // any injected script) cannot read them. Clients that cannot use cookies (curl,
+            // native mobile apps) may still read them from the response body.
+            long refreshTokenExpirationSeconds = (long) refreshExpirationDays * 24 * 60 * 60;
+            cookieUtil.setRefreshTokenCookie(response, tokenResponse.getRefreshToken(),
+                    refreshTokenExpirationSeconds);
+            cookieUtil.setAccessTokenCookie(response, tokenResponse.getAccessToken(),
+                    tokenResponse.getExpiresIn());
 
-        // Return 200 OK with tokens
-        return ResponseEntity.ok(tokenResponse);
+            return ResponseEntity.ok(tokenResponse);
+
+        } catch (UserNotFoundException | IllegalArgumentException e) {
+            log.warn("Login failed: {}", e.getMessage());
+            throw e;
+        } catch (Exception e) {
+            log.error("Unexpected error during login", e);
+            throw e;
+        }
     }
 
     /**
@@ -102,8 +128,6 @@ public class AuthController {
      * {
      *   "token": "eyJhbGciOiJIUzUxMiJ9..."
      * }
-     *
-     * Response: 200 OK with success message
      */
     @PostMapping("/verify-email")
     public ResponseEntity<ApiResponse> verifyEmail(
@@ -122,30 +146,78 @@ public class AuthController {
             return ResponseEntity.ok(response);
 
         } catch (InvalidTokenException e) {
+            log.warn("Email verification failed - invalid token");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.builder()
                             .status(HttpStatus.BAD_REQUEST.value())
                             .message(e.getMessage())
                             .build());
+
         } catch (IllegalArgumentException e) {
+            log.warn("Email verification failed - {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .body(ApiResponse.builder()
                             .status(HttpStatus.CONFLICT.value())
                             .message(e.getMessage())
                             .build());
+
+        } catch (Exception e) {
+            log.error("Unexpected error during email verification", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.INTERNAL_SERVER_ERROR.value())
+                            .message("Email verification failed")
+                            .build());
         }
     }
+
+
+    @GetMapping("/verify-email")
+    public ResponseEntity<ApiResponse> verifyEmail(
+            @RequestParam("token") String token) {
+
+        log.info("Email verification request with token");
+
+        try {
+            authService.verifyEmail(token);
+
+            ApiResponse response = ApiResponse.builder()
+                    .status(HttpStatus.OK.value())
+                    .message("Email verified successfully. You can now login.")
+                    .build();
+
+            return ResponseEntity.ok(response);
+
+        } catch (InvalidTokenException e) {
+            log.warn("Email verification failed - invalid token");
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.BAD_REQUEST.value())
+                            .message("Invalid or expired verification token")
+                            .build());
+
+        } catch (IllegalArgumentException e) {
+            log.warn("Email verification failed - {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.CONFLICT.value())
+                            .message(e.getMessage())
+                            .build());
+
+        } catch (Exception e) {
+            log.error("Unexpected error during email verification", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.INTERNAL_SERVER_ERROR.value())
+                            .message("Email verification failed")
+                            .build());
+        }
+    }
+
 
     /**
      * POST /api/auth/resend-verification-email
      * Resend verification email to user
-     *
-     * Request body:
-     * {
-     *   "email": "user@example.com"
-     * }
-     *
-     * Response: 200 OK with success message
      */
     @PostMapping("/resend-verification-email")
     public ResponseEntity<ApiResponse> resendVerificationEmail(
@@ -164,7 +236,7 @@ public class AuthController {
             return ResponseEntity.ok(response);
 
         } catch (UserNotFoundException e) {
-            // Don't reveal if email exists (security best practice)
+            // Security: Don't reveal if email exists
             log.warn("Resend verification email for non-existent email: {}", request.getEmail());
             ApiResponse response = ApiResponse.builder()
                     .status(HttpStatus.OK.value())
@@ -173,24 +245,27 @@ public class AuthController {
             return ResponseEntity.ok(response);
 
         } catch (IllegalArgumentException e) {
+            log.warn("Resend verification failed - {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .body(ApiResponse.builder()
                             .status(HttpStatus.CONFLICT.value())
                             .message(e.getMessage())
                             .build());
+
+        } catch (Exception e) {
+            log.error("Error during resend verification email", e);
+            // Still return generic message for security
+            ApiResponse response = ApiResponse.builder()
+                    .status(HttpStatus.OK.value())
+                    .message("If email exists in our system, verification email will be sent.")
+                    .build();
+            return ResponseEntity.ok(response);
         }
     }
 
     /**
      * POST /api/auth/forgot-password
      * Request password reset link
-     *
-     * Request body:
-     * {
-     *   "email": "user@example.com"
-     * }
-     *
-     * Response: 200 OK (always, for security - don't reveal if email exists)
      */
     @PostMapping("/forgot-password")
     public ResponseEntity<ApiResponse> forgotPassword(
@@ -225,14 +300,6 @@ public class AuthController {
     /**
      * POST /api/auth/reset-password
      * Reset password with valid reset token
-     *
-     * Request body:
-     * {
-     *   "token": "eyJhbGciOiJIUzUxMiJ9...",
-     *   "newPassword": "NewSecurePass123!"
-     * }
-     *
-     * Response: 200 OK with success message
      */
     @PostMapping("/reset-password")
     public ResponseEntity<ApiResponse> resetPassword(
@@ -251,6 +318,7 @@ public class AuthController {
             return ResponseEntity.ok(response);
 
         } catch (InvalidTokenException e) {
+            log.warn("Password reset failed - invalid token");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.builder()
                             .status(HttpStatus.BAD_REQUEST.value())
@@ -258,10 +326,19 @@ public class AuthController {
                             .build());
 
         } catch (IllegalArgumentException e) {
+            log.warn("Password reset failed - {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.builder()
                             .status(HttpStatus.BAD_REQUEST.value())
                             .message(e.getMessage())
+                            .build());
+
+        } catch (Exception e) {
+            log.error("Unexpected error during password reset", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.INTERNAL_SERVER_ERROR.value())
+                            .message("Password reset failed")
                             .build());
         }
     }
@@ -269,11 +346,6 @@ public class AuthController {
     /**
      * GET /api/auth/verify-token/{token}
      * Check if a reset/verification token is valid
-     *
-     * Path parameters:
-     * - token: verification or reset token
-     *
-     * Response: 200 OK if valid, 400 if invalid
      */
     @GetMapping("/verify-token/{token}")
     public ResponseEntity<ApiResponse> verifyToken(
@@ -328,169 +400,265 @@ public class AuthController {
     /**
      * POST /api/auth/refresh
      * Refresh expired access token using refresh token
-     * Refresh token can be sent either in:
-     * 1. Request body (for mobile apps)
-     * 2. Cookie (for web browsers - automatic)
-     *
-     * Request body (optional):
-     * {
-     *   "refreshToken": "eyJhbGciOiJIUzUxMiJ9..."
-     * }
      */
     @PostMapping("/refresh")
-    public ResponseEntity<TokenResponseDto> refreshToken(
+    public ResponseEntity<ApiResponse> refreshToken(
             @RequestBody(required = false) TokenRefreshRequestDto request,
             @CookieValue(value = "refreshToken", required = false) String cookieRefreshToken,
             HttpServletResponse response) {
 
         log.info("Token refresh request");
 
-        // Get refresh token from request body or cookie
-        String refreshToken = null;
-        if (request != null && request.getRefreshToken() != null) {
-            refreshToken = request.getRefreshToken();
-        } else if (cookieRefreshToken != null) {
-            refreshToken = cookieRefreshToken;
-        }
+        try {
+            // Get refresh token from request body or cookie
+            String refreshToken = null;
+            if (request != null && request.getRefreshToken() != null) {
+                refreshToken = request.getRefreshToken();
+            } else if (cookieRefreshToken != null) {
+                refreshToken = cookieRefreshToken;
+            }
 
-        if (refreshToken == null) {
-            log.warn("Refresh token not found in request body or cookie");
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(TokenResponseDto.builder()
+            if (refreshToken == null) {
+                log.warn("Refresh token not found in request or cookie");
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                        .body(ApiResponse.builder()
+                                .status(HttpStatus.UNAUTHORIZED.value())
+                                .message("Refresh token not found")
+                                .build());
+            }
+
+            // Refresh the access token
+            TokenResponseDto tokenResponse = authService.refreshAccessToken(
+                    new TokenRefreshRequestDto(refreshToken));
+
+            // Rotate both cookies so the browser stays in sync with the new tokens
+            long refreshTokenExpirationSeconds = (long) refreshExpirationDays * 24 * 60 * 60;
+            cookieUtil.setRefreshTokenCookie(response, tokenResponse.getRefreshToken(),
+                    refreshTokenExpirationSeconds);
+            cookieUtil.setAccessTokenCookie(response, tokenResponse.getAccessToken(),
+                    tokenResponse.getExpiresIn());
+
+            return ResponseEntity.ok(ApiResponse.builder()
+                    .status(HttpStatus.OK.value())
+                    .message("Token refreshed successfully")
+                    .data(tokenResponse)
+                    .build());
+
+        } catch (InvalidTokenException e) {
+            log.warn("Token refresh failed - invalid token");
+            cookieUtil.clearRefreshTokenCookie(response);
+            cookieUtil.clearAccessTokenCookie(response);
+
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.UNAUTHORIZED.value())
+                            .message("Invalid or expired refresh token")
+                            .build());
+
+        } catch (Exception e) {
+            log.error("Unexpected error during token refresh", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.builder()
+                            .status(HttpStatus.INTERNAL_SERVER_ERROR.value())
+                            .message("Token refresh failed")
                             .build());
         }
-
-        // Refresh the access token
-        TokenRefreshRequestDto refreshRequest = new TokenRefreshRequestDto(refreshToken);
-        TokenResponseDto tokenResponse = authService.refreshAccessToken(refreshRequest);
-
-        // Update refresh token cookie
-        long refreshTokenExpirationSeconds = 7 * 24 * 60 * 60; // 7 days
-        cookieUtil.setRefreshTokenCookie(response, tokenResponse.getRefreshToken(), refreshTokenExpirationSeconds);
-
-        // Return 200 OK with new tokens
-        return ResponseEntity.ok(tokenResponse);
     }
 
     /**
      * POST /api/auth/logout
      * Logout the authenticated user
-     * Clears the refresh token cookie on client side
      */
     @PostMapping("/logout")
     public ResponseEntity<ApiResponse> logout(HttpServletResponse response) {
-        // Get authenticated user
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
-        if (authentication != null && authentication.isAuthenticated()) {
-            String username = authentication.getName();
-            log.info("Logout request for user: {}", username);
+        log.info("Logout request");
+
+        try {
+            // Get authenticated user
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+
+            if (authentication != null && authentication.isAuthenticated()) {
+                String username = authentication.getName();
+                log.info("Logout for user: {}", username);
+            }
+
+            // Clear both token cookies
+            cookieUtil.clearRefreshTokenCookie(response);
+            cookieUtil.clearAccessTokenCookie(response);
+
+            // Clear security context on server side
+            SecurityContextHolder.clearContext();
+
+            // Return success response
+            ApiResponse apiResponse = ApiResponse.builder()
+                    .status(HttpStatus.OK.value())
+                    .message("Logged out successfully")
+                    .build();
+
+            return ResponseEntity.ok(apiResponse);
+
+        } catch (Exception e) {
+            log.error("Error during logout", e);
+
+            // Still clear cookies and context
+            cookieUtil.clearRefreshTokenCookie(response);
+            cookieUtil.clearAccessTokenCookie(response);
+            SecurityContextHolder.clearContext();
+
+            return ResponseEntity.ok(ApiResponse.builder()
+                    .status(HttpStatus.OK.value())
+                    .message("Logged out successfully")
+                    .build());
         }
-
-        // Clear refresh token cookie
-        cookieUtil.clearRefreshTokenCookie(response);
-
-        // Clear security context on server side
-        SecurityContextHolder.clearContext();
-
-        // Return success response
-        ApiResponse apiResponse = ApiResponse.builder()
-                .status(HttpStatus.OK.value())
-                .message("Logged out successfully")
-                .build();
-
-        return ResponseEntity.ok(apiResponse);
     }
 
     /**
      * GET /api/auth/me
      * Get current authenticated user details
-     * Requires valid JWT access token
      */
     @GetMapping("/me")
     public ResponseEntity<CurrentUserDto> getCurrentUser() {
-        // Get authenticated user from security context
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
-        if (authentication == null || !authentication.isAuthenticated()) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        log.debug("Get current user request");
+
+        try {
+            // Get authenticated user from security context
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+
+            if (authentication == null || !authentication.isAuthenticated()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            }
+
+            String username = authentication.getName();
+            log.debug("Fetching current user details: {}", username);
+
+            // Get user details from service
+            User user = authService.getCurrentUser(username);
+
+            CurrentUserDto userDto = CurrentUserDto.builder()
+                    .id(user.getId())
+                    .username(user.getUsername())
+                    .email(user.getEmail())
+                    .firstName(user.getFirstName())
+                    .lastName(user.getLastName())
+                    .role(user.getRole().name())
+                    .status(user.getStatus().name())
+                    .emailVerified(user.getEmailVerified())
+                    .createdAt(user.getCreatedAt())
+                    .lastLoginAt(user.getLastLoginAt())
+                    .build();
+
+            return ResponseEntity.ok(userDto);
+
+        } catch (Exception e) {
+            log.error("Error retrieving current user", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
-
-        String username = authentication.getName();
-        log.debug("Fetching current user details: {}", username);
-
-        // Get user details from service
-        com.contentanalytics.entity.User user = authService.getCurrentUser(username);
-
-        CurrentUserDto userDto = CurrentUserDto.builder()
-                .id(user.getId())
-                .username(user.getUsername())
-                .email(user.getEmail())
-                .firstName(user.getFirstName())
-                .lastName(user.getLastName())
-                .role(user.getRole().name())
-                .status(user.getStatus().name())
-                .emailVerified(user.getEmailVerified())
-                .createdAt(user.getCreatedAt())
-                .lastLoginAt(user.getLastLoginAt())
-                .build();
-
-        return ResponseEntity.ok(userDto);
     }
 
     /**
      * POST /api/auth/invalidate-tokens
-     * Invalidate all tokens for current user (security incident, password change)
-     * Forces user to login again
+     * Invalidate all tokens for current user
      */
     @PostMapping("/invalidate-tokens")
     public ResponseEntity<ApiResponse> invalidateAllTokens(HttpServletResponse response) {
-        // Get authenticated user
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
-        if (authentication == null || !authentication.isAuthenticated()) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        log.info("Invalidate all tokens request");
+
+        try {
+            // Get authenticated user
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+
+            if (authentication == null || !authentication.isAuthenticated()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            }
+
+            String username = authentication.getName();
+            log.info("Invalidating all tokens for user: {}", username);
+
+            // Get user details and invalidate tokens
+            User user = authService.getCurrentUser(username);
+            authService.invalidateAllTokens(user.getId());
+
+            // Clear refresh token cookie
+            cookieUtil.clearRefreshTokenCookie(response);
+
+            // Clear security context
+            SecurityContextHolder.clearContext();
+
+            ApiResponse apiResponse = ApiResponse.builder()
+                    .status(HttpStatus.OK.value())
+                    .message("All tokens have been invalidated. Please login again.")
+                    .build();
+
+            return ResponseEntity.ok(apiResponse);
+
+        } catch (Exception e) {
+            log.error("Error invalidating tokens", e);
+            cookieUtil.clearRefreshTokenCookie(response);
+            SecurityContextHolder.clearContext();
+
+            return ResponseEntity.ok(ApiResponse.builder()
+                    .status(HttpStatus.OK.value())
+                    .message("All tokens have been invalidated. Please login again.")
+                    .build());
         }
+    }
 
-        String username = authentication.getName();
-        log.info("Invalidating all tokens for user: {}", username);
+    /**
+     * GET /api/auth/csrf
+     * Returns the current CSRF token for the browser SPA.
+     * <p>
+     * The response also refreshes the {@code XSRF-TOKEN} cookie. The SPA should send the value
+     * returned here in the {@code X-XSRF-TOKEN} header on every state-changing request.
+     */
+    @GetMapping("/csrf")
+    public ResponseEntity<Map<String, String>> csrf(
+            @CookieValue(value = "XSRF-TOKEN", required = false) String cookieToken) {
 
-        // Get user details and invalidate tokens
-        User user = authService.getCurrentUser(username);
+        // Spring Security exposes the (masked) token as a request attribute
+        // under its class name.
+        Object attribute = RequestContextHolder.currentRequestAttributes()
+                .getAttribute(CsrfToken.class.getName(), RequestAttributes.SCOPE_REQUEST);
 
-                    authService.invalidateAllTokens(user.getId());
+        CsrfToken token = attribute instanceof CsrfToken csrf ? csrf : null;
 
-        // Clear refresh token cookie
-        cookieUtil.clearRefreshTokenCookie(response);
+        String value = token != null ? token.getToken() : cookieToken;
 
-        // Clear security context
-        SecurityContextHolder.clearContext();
-
-        ApiResponse apiResponse = ApiResponse.builder()
-                .status(HttpStatus.OK.value())
-                .message("All tokens have been invalidated. Please login again.")
-                .build();
-
-        return ResponseEntity.ok(apiResponse);
+        return ResponseEntity.ok(Map.of(
+                "token", value != null ? value : "",
+                "headerName", "X-XSRF-TOKEN"
+        ));
     }
 
     /**
      * GET /api/auth/validate-token
      * Validate if current access token is still valid
-     * Used by frontend to check token status
      */
     @GetMapping("/validate-token")
     public ResponseEntity<TokenValidationDto> validateToken() {
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
-        boolean isValid = authentication != null && authentication.isAuthenticated();
+        log.debug("Token validation request");
 
-        TokenValidationDto validationDto = TokenValidationDto.builder()
-                .valid(isValid)
-                .username(isValid ? authentication.getName() : null)
-                .build();
+        try {
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
-        return ResponseEntity.ok(validationDto);
+            boolean isValid = authentication != null && authentication.isAuthenticated();
+
+            TokenValidationDto validationDto = TokenValidationDto.builder()
+                    .valid(isValid)
+                    .username(isValid ? authentication.getName() : null)
+                    .build();
+
+            return ResponseEntity.ok(validationDto);
+
+        } catch (Exception e) {
+            log.error("Error validating token", e);
+            return ResponseEntity.ok(TokenValidationDto.builder()
+                    .valid(false)
+                    .build());
+        }
     }
 
 }

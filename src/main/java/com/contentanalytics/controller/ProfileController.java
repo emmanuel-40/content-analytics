@@ -2,74 +2,57 @@ package com.contentanalytics.controller;
 
 import com.contentanalytics.dto.*;
 import com.contentanalytics.service.ProfileService;
+import com.contentanalytics.service.StorageService;
+import com.contentanalytics.util.SecurityUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
-import java.util.Map;
+import java.util.UUID;
 
-@RestController
+@RestController("userProfileController")
 @RequestMapping("/api/profile")
 @RequiredArgsConstructor
 @Slf4j
 public class ProfileController {
 
     private final ProfileService profileService;
+    private final SecurityUtil securityUtil;
+    private final StorageService storageService;
 
     /**
      * GET /api/profile
      * Get authenticated user's complete profile
-     *
-     * Response: UserProfileDto with all profile information
      */
     @GetMapping
     public ResponseEntity<UserProfileDto> getProfile() {
-        String userId = getCurrentUserId();
+        UUID userId = securityUtil.getCurrentUserId();  // ← USE SecurityUtil
         log.debug("Fetching profile for user: {}", userId);
 
         UserProfileDto profile = profileService.getUserProfile(userId);
-
         return ResponseEntity.ok(profile);
     }
 
     /**
      * PUT /api/profile
      * Update authenticated user's profile information
-     *
-     * Request body: UpdateProfileRequestDto
-     * {
-     *   "firstName": "Jane",
-     *   "lastName": "Doe",
-     *   "bio": "Data scientist interested in AI",
-     *   "location": "San Francisco, USA",
-     *   "timezone": "PST",
-     *   "website": "https://janedoe.com",
-     *   "company": "TechCorp",
-     *   "jobTitle": "Senior Data Scientist",
-     *   "emailNotifications": true,
-     *   "publicProfile": false
-     * }
-     *
-     * Response: Updated UserProfileDto
      */
     @PutMapping
     public ResponseEntity<UserProfileDto> updateProfile(
             @Valid @RequestBody UpdateProfileRequestDto request) {
 
-        String userId = getCurrentUserId();
+        UUID userId = securityUtil.getCurrentUserId();  // ← USE SecurityUtil
         log.info("Profile update request from user: {}", userId);
 
         try {
             UserProfileDto updatedProfile = profileService.updateProfile(userId, request);
-
             return ResponseEntity.ok(updatedProfile);
 
         } catch (IllegalArgumentException e) {
@@ -81,34 +64,20 @@ public class ProfileController {
     /**
      * POST /api/profile/picture
      * Upload profile picture
-     *
-     * Multipart form data:
-     * - file: Image file (JPEG, PNG, WebP, max 5MB)
-     *
-     * Server processes:
-     * - Creates 3 sizes: 150x150 (thumbnail), 400x400 (medium), 800x800 (full)
-     * - Optimizes images (compression, quality)
-     * - Stores to S3 or local storage
-     * - Deactivates old picture
-     *
-     * Response: Updated UserProfileDto with new avatar URLs
      */
     @PostMapping("/picture")
     public ResponseEntity<UserProfileDto> uploadProfilePicture(
             @RequestParam("file") MultipartFile file,
             HttpServletRequest httpRequest) {
 
-        String userId = getCurrentUserId();
+        UUID userId = securityUtil.getCurrentUserId();  // ← USE SecurityUtil
         String ipAddress = getClientIp(httpRequest);
 
         log.info("Profile picture upload request from user: {}", userId);
 
         try {
-            // Upload and process
             UserProfileDto profile = profileService.uploadProfilePicture(userId, file, ipAddress);
-
             log.info("Profile picture uploaded successfully for user: {}", userId);
-
             return ResponseEntity.status(HttpStatus.CREATED).body(profile);
 
         } catch (IllegalArgumentException e) {
@@ -123,20 +92,16 @@ public class ProfileController {
 
     /**
      * DELETE /api/profile/picture
-     * Delete profile picture (reverts to Gravatar)
-     *
-     * Response: ProfilePictureDeleteResponseDto with new avatar URL
+     * Delete profile picture
      */
     @DeleteMapping("/picture")
     public ResponseEntity<ProfilePictureDeleteResponseDto> deleteProfilePicture() {
 
-        String userId = getCurrentUserId();
+        UUID userId = securityUtil.getCurrentUserId();  // ← USE SecurityUtil
         log.info("Delete profile picture request from user: {}", userId);
 
         try {
             profileService.deleteProfilePicture(userId);
-
-            // Fetch updated profile to get new gravatar URL
             UserProfileDto updatedProfile = profileService.getUserProfile(userId);
 
             ProfilePictureDeleteResponseDto response = ProfilePictureDeleteResponseDto.builder()
@@ -158,34 +123,72 @@ public class ProfileController {
     }
 
     /**
+     * GET /api/profile/picture/file?key={storageKey}
+     * Stream a stored profile-picture variant when storage is local.
+     * <p>
+     * Only used by {@code local} storage; on S3/Supabase the client gets a presigned URL
+     * instead. Kept authenticated and ownership-checked so a private filesystem stays private
+     * too.
+     * <p>
+     * ImageService names every variant {@code profile-{userId}-{size}-{timestamp}.jpg}, so the
+     * caller's own UUID is baked into the key. We only ever serve keys in that namespace --
+     * anything else (other users' keys, path traversal) is rejected before touching disk.
+     */
+    @GetMapping("/picture/file")
+    public ResponseEntity<org.springframework.core.io.Resource> getProfilePictureFile(
+            @RequestParam("key") String key) {
+
+        UUID userId = securityUtil.getCurrentUserId();
+
+        if (key == null || key.isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+
+        // Ownership check: the key must be in this caller's own profile-picture namespace.
+        if (!key.startsWith("profile-" + userId + "-")) {
+            log.warn("User {} attempted to read a picture key outside their namespace", userId);
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+
+        try {
+            org.springframework.core.io.Resource resource = storageService.loadFileAsResource(key);
+            if (!resource.exists()) {
+                return ResponseEntity.notFound().build();
+            }
+
+            return ResponseEntity.ok()
+                    .contentType(guessContentType(key))
+                    .body(resource);
+
+        } catch (IllegalArgumentException e) {
+            log.warn("Rejected picture key from user {}: {}", userId, e.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (Exception e) {
+            log.error("Error streaming profile picture for user {}", userId, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    private static MediaType guessContentType(String key) {
+        String lower = key.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".png")) return MediaType.IMAGE_PNG;
+        if (lower.endsWith(".webp")) return MediaType.parseMediaType("image/webp");
+        if (lower.endsWith(".gif")) return MediaType.IMAGE_GIF;
+        return MediaType.IMAGE_JPEG;
+    }
+
+    /**
      * POST /api/profile/change-password
-     * Change user's password (requires current password)
-     *
-     * Request body: ChangePasswordRequestDto
-     * {
-     *   "oldPassword": "CurrentPassword123!",
-     *   "newPassword": "NewPassword456!",
-     *   "confirmPassword": "NewPassword456!"
-     * }
-     *
-     * Response: 200 OK with success message
-     *
-     * Security:
-     * - Requires verification of current password
-     * - Rate limited (1 change per hour)
-     * - Prevents reuse of last 5 passwords
-     * - Invalidates all other sessions (forces re-login)
-     * - Sends email notification
+     * Change user's password
      */
     @PostMapping("/change-password")
     public ResponseEntity<PasswordChangeResponseDto> changePassword(
             @Valid @RequestBody ChangePasswordRequestDto request,
             HttpServletRequest httpRequest) {
 
-        String userId = getCurrentUserId();
+        UUID userId = securityUtil.getCurrentUserId();  // ← USE SecurityUtil
         log.info("Password change request from user: {}", userId);
 
-        // Validate password confirmation
         if (!request.isPasswordConfirmed()) {
             log.warn("Password confirmation mismatch for user: {}", userId);
             return ResponseEntity.badRequest()
@@ -196,14 +199,12 @@ public class ProfileController {
         }
 
         try {
-            // Get client IP and user agent for audit trail
             String ipAddress = getClientIp(httpRequest);
             String userAgent = httpRequest.getHeader("User-Agent");
 
             request.setIpAddress(ipAddress);
             request.setUserAgent(userAgent);
 
-            // Change password
             profileService.changePassword(userId, request);
 
             PasswordChangeResponseDto response = PasswordChangeResponseDto.builder()
@@ -227,15 +228,7 @@ public class ProfileController {
 
     /**
      * GET /api/profile/validate-field/{field}
-     * Validate a profile field (for real-time validation on frontend)
-     *
-     * Path parameters:
-     * - field: Field name to validate (website, phoneNumber, etc)
-     *
-     * Query parameters:
-     * - value: Field value to validate
-     *
-     * Response: ProfileValidationResponseDto
+     * Validate a profile field
      */
     @GetMapping("/validate-field/{field}")
     public ResponseEntity<ProfileValidationResponseDto> validateField(
@@ -243,9 +236,7 @@ public class ProfileController {
             @RequestParam String value) {
 
         log.debug("Field validation request for: {}", field);
-
         ProfileValidationResponseDto response = validateProfileField(field, value);
-
         return ResponseEntity.ok(response);
     }
 
@@ -304,33 +295,7 @@ public class ProfileController {
     }
 
     /**
-     * Get current authenticated user ID from JWT claims
-     */
-    private String getCurrentUserId() {
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-
-        if (authentication == null || !authentication.isAuthenticated()) {
-            throw new IllegalStateException("User is not authenticated");
-        }
-
-        Object details = authentication.getDetails();
-        if (details instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> detailsMap = (Map<String, Object>) details;
-            String userId = (String) detailsMap.get("userId");
-
-            if (userId == null) {
-                throw new IllegalStateException("User ID not found in authentication");
-            }
-
-            return userId;
-        }
-
-        throw new IllegalStateException("Invalid authentication details");
-    }
-
-    /**
-     * Get client IP address from request (handles proxies)
+     * Get client IP address from request
      */
     private String getClientIp(HttpServletRequest request) {
         String xForwardedFor = request.getHeader("X-Forwarded-For");

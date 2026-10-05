@@ -31,7 +31,7 @@ public class ImageService {
      * Process and upload profile picture
      * Creates 3 sizes: thumbnail (150x150), medium (400x400), full (800x800)
      */
-    public ImageProcessingResult processProfilePicture(MultipartFile file, String userId) {
+    public ImageProcessingResult processProfilePicture(MultipartFile file, UUID userId) {
         log.info("Processing profile picture for user: {}", userId);
 
         try {
@@ -159,10 +159,14 @@ public class ImageService {
     /**
      * Upload image to storage
      */
-    private String uploadImage(String userId, String size, byte[] imageBytes, String timestamp) {
-        String filename = String.format("profile-%s-%s-%s.jpg", userId, size, timestamp);
-        // Would implement actual upload via StorageService
-        return filename;
+    private String uploadImage(UUID userId, String size, byte[] imageBytes, String timestamp) {
+        String fileKey = String.format("profile-%s-%s-%s.jpg", userId, size, timestamp);
+
+        // Persist the bytes. This used to just return the filename, so avatars were recorded
+        // in profile_pictures but never written to storage -- every later read 404'd.
+        storageService.saveBytes(fileKey, imageBytes, "image/jpeg");
+
+        return fileKey;
     }
 
     /**

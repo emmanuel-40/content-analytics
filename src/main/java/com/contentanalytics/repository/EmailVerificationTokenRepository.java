@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
+import java.util.UUID;
 
 @Repository
 public interface EmailVerificationTokenRepository extends JpaRepository<EmailVerificationToken, String> {
@@ -27,7 +28,7 @@ public interface EmailVerificationTokenRepository extends JpaRepository<EmailVer
      * Find all valid tokens for user
      */
     @Query("SELECT t FROM EmailVerificationToken t WHERE t.user.id = :userId AND t.used = false AND t.expiryDate > :now")
-    java.util.List<EmailVerificationToken> findValidTokensForUser(@Param("userId") String userId, @Param("now") LocalDateTime now);
+    java.util.List<EmailVerificationToken> findValidTokensForUser(@Param("userId") UUID userId, @Param("now") LocalDateTime now);
 
     /**
      * Delete expired tokens

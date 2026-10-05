@@ -17,6 +17,47 @@ public class CookieUtil {
     private String allowedOrigins;
 
     /**
+     * Set the access token in an HTTP-only cookie.
+     * <p>
+     * Storing the access token in a cookie (rather than returning it in the response body for
+     * the frontend to keep in {@code localStorage}) means a successful XSS attack cannot read
+     * it, which is the primary advantage of cookie-based JWT auth.
+     * <p>
+     * The cookie is scoped to the API root and marked {@code SameSite=Lax} so it accompanies
+     * same-site navigations while remaining cross-site protected.
+     */
+    public void setAccessTokenCookie(HttpServletResponse response, String accessToken, long maxAgeSeconds) {
+        ResponseCookie cookie = ResponseCookie
+                .from("accessToken", accessToken)
+                .httpOnly(true)
+                .secure(isSecureCookies())
+                .path(contextPath + "/api")
+                .maxAge(maxAgeSeconds)
+                .sameSite("Lax")
+                .build();
+
+        response.addHeader("Set-Cookie", cookie.toString());
+        log.debug("Access token cookie set");
+    }
+
+    /**
+     * Clear the access token cookie (on logout).
+     */
+    public void clearAccessTokenCookie(HttpServletResponse response) {
+        ResponseCookie cookie = ResponseCookie
+                .from("accessToken", "")
+                .httpOnly(true)
+                .secure(isSecureCookies())
+                .path(contextPath + "/api")
+                .maxAge(0)
+                .sameSite("Lax")
+                .build();
+
+        response.addHeader("Set-Cookie", cookie.toString());
+        log.debug("Access token cookie cleared");
+    }
+
+    /**
      * Set refresh token in HTTP-only secure cookie
      * Frontend cannot access this via JavaScript
      */
@@ -43,7 +84,7 @@ public class CookieUtil {
         ResponseCookie cookie = ResponseCookie
                 .from("refreshToken", "")
                 .httpOnly(true)
-                .secure(allowedOrigins.contains("https"))
+                .secure(isSecureCookies())
                 .path(contextPath + "/api/auth")
                 .maxAge(0) // Tells browser to delete cookie
                 .sameSite("Strict")
@@ -51,6 +92,14 @@ public class CookieUtil {
 
         response.addHeader("Set-Cookie", cookie.toString());
         log.debug("Refresh token cookie cleared");
+    }
+
+    /**
+     * Cookies are only marked Secure when the allowed origins use HTTPS, so local HTTP
+     * development still works while production traffic stays encrypted.
+     */
+    private boolean isSecureCookies() {
+        return allowedOrigins != null && allowedOrigins.contains("https");
     }
 
     /**

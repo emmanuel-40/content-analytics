@@ -22,7 +22,7 @@ public class WebSocketService {
      * Send document processing progress to specific user
      * /user/{userId}/queue/documents
      */
-    public void sendDocumentProgress(String userId, String documentId, String fileName,
+    public void sendDocumentProgress(UUID userId, UUID documentId, String fileName,
                                      Float progress, String status, String processingStage) {
         log.debug("Sending progress update to user: {} for document: {}", userId, documentId);
 
@@ -40,7 +40,7 @@ public class WebSocketService {
 
         // Send to user's private queue
         messagingTemplate.convertAndSendToUser(
-                userId,
+                String.valueOf(userId),
                 "/queue/documents",
                 message
         );
@@ -49,7 +49,7 @@ public class WebSocketService {
     /**
      * Send document processing completion to specific user
      */
-    public void sendDocumentCompleted(String userId, String documentId, String fileName,
+    public void sendDocumentCompleted(UUID userId, UUID documentId, String fileName,
                                       String summary, String keyTopics, String sentiment,
                                       Float confidenceScore, Integer wordCount, Long processingTimeMs) {
         log.info("Sending completion update to user: {} for document: {}", userId, documentId);
@@ -73,7 +73,7 @@ public class WebSocketService {
 
         // Send to user's private queue
         messagingTemplate.convertAndSendToUser(
-                userId,
+                String.valueOf(userId),
                 "/queue/documents",
                 message
         );
@@ -82,7 +82,7 @@ public class WebSocketService {
     /**
      * Send document processing failure to specific user
      */
-    public void sendDocumentFailed(String userId, String documentId, String fileName,
+    public void sendDocumentFailed(UUID userId, UUID documentId, String fileName,
                                    String errorMessage, String errorCode) {
         log.error("Sending failure update to user: {} for document: {}", userId, documentId);
 
@@ -101,7 +101,7 @@ public class WebSocketService {
 
         // Send to user's private queue
         messagingTemplate.convertAndSendToUser(
-                userId,
+                String.valueOf(userId),
                 "/queue/documents",
                 message
         );

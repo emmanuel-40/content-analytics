@@ -1,5 +1,6 @@
 package com.contentanalytics.security;
 
+import com.contentanalytics.exception.InvalidTokenException;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
@@ -13,6 +14,7 @@ import javax.crypto.SecretKey;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 @Component
 @RequiredArgsConstructor
@@ -32,11 +34,11 @@ public class JwtTokenProvider {
      * Generate Access Token (short-lived)
      * Used for API requests
      */
-    public String generateAccessToken(String userId, String username, String email) {
+    public String generateAccessToken(UUID userId, String username, String email) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("type", "ACCESS");
         claims.put("email", email);
-        claims.put("userId", userId);
+        claims.put("userId", userId.toString());
 
         return createToken(claims, username, jwtExpirationMs);
     }
@@ -44,12 +46,15 @@ public class JwtTokenProvider {
     /**
      * Generate Refresh Token (long-lived)
      * Used to get new access tokens
+     *
+     * @param tokenVersion current token version of the user, embedded so that
+     *                     bulk invalidation (e.g. password change) can be detected
      */
-    public String generateRefreshToken(String userId, String username) {
+    public String generateRefreshToken(UUID userId, String username, Integer tokenVersion) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("type", "REFRESH");
-        claims.put("userId", userId);
-        claims.put("tokenVersion", 1); // For token rotation
+        claims.put("userId", userId.toString());
+        claims.put("tokenVersion", tokenVersion);
 
         return createToken(claims, username, refreshTokenExpirationMs);
     }
@@ -100,9 +105,29 @@ public class JwtTokenProvider {
     /**
      * Get user ID from token
      */
-    public String getUserIdFromToken(String token) {
+    public UUID getUserIdFromToken(String token) {
         Claims claims = getClaimsFromToken(token);
-        return claims != null ? (String) claims.get("userId") : null;
+        if (claims == null) {
+            throw new InvalidTokenException("Invalid or expired token");
+        }
+
+        Object userIdObj = claims.get("userId");
+
+        if (userIdObj == null) {
+            throw new IllegalArgumentException("userId not found in token");
+        }
+
+        if (userIdObj instanceof String) {
+            try {
+                return UUID.fromString((String) userIdObj);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Invalid userId format in token", e);
+            }
+        } else if (userIdObj instanceof UUID) {
+            return (UUID) userIdObj;
+        } else {
+            throw new IllegalArgumentException("Invalid userId type in token: " + userIdObj.getClass());
+        }
     }
 
     /**

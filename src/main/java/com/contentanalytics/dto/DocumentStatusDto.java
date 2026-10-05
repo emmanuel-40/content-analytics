@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -15,7 +16,7 @@ import java.time.LocalDateTime;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class DocumentStatusDto {
 
-    private String documentId;
+    private UUID documentId;
     private String fileName;
     private String status; // UPLOADED, PROCESSING, COMPLETED, FAILED
     private Float processingProgress; // 0-100%

@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -15,7 +16,8 @@ import java.time.LocalDateTime;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class DocumentResponseDto {
 
-    private String id;
+    private UUID id;
+    private UUID userId;
     private String fileName;
     private Long fileSize;
     private String mimeType;
@@ -30,7 +32,7 @@ public class DocumentResponseDto {
     private LocalDateTime processingCompletedAt;
 
     // Analysis results
-    private String extractedText;
+
     private Integer wordCount;
     private Integer characterCount;
     private String summary;

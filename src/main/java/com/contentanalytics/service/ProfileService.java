@@ -10,14 +10,17 @@ import com.contentanalytics.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -33,21 +36,62 @@ public class ProfileService {
     private final GravatarService gravatarService;
     private final EmailService emailService;
     private final PasswordEncoder passwordEncoder;
+    private final StorageService storageService;
 
     @Value("${app.password.min-change-interval-hours:1}")
     private int minPasswordChangeInterval;
 
     /**
+     * How long a generated image URL stays valid.
+     * <p>
+     * Short enough that a leaked URL stops working, long enough to survive a page render plus
+     * a few navigation clicks.
+     */
+    private static final java.time.Duration IMAGE_URL_TTL = java.time.Duration.ofHours(1);
+
+    /**
+     * Resolve a stored image key into something a browser can load.
+     * <p>
+     * The {@code *_url} columns on {@code profile_pictures} actually hold storage keys, not URLs.
+     * Turning them into a real URL here is what allows the bucket to stay private:
+     * <ul>
+     *   <li>S3 / Supabase - a short-lived presigned URL</li>
+     *   <li>local filesystem - the authenticated serving route, so local dev needs no public
+     *       directory either</li>
+     * </ul>
+     *
+     * @param storageKey the key to resolve
+     * @return a loadable URL, or {@code null} when there is nothing to serve
+     */
+    public String resolveImageUrl(String storageKey) {
+        if (storageKey == null || storageKey.isBlank()) {
+            return null;
+        }
+
+        String signed = storageService.generatePresignedUrl(storageKey, IMAGE_URL_TTL);
+        if (signed != null) {
+            return signed;
+        }
+
+        // Local storage: fall back to the authenticated serving endpoint.
+        return "/api/profile/picture/file?key="
+                + java.net.URLEncoder.encode(storageKey, StandardCharsets.UTF_8);
+    }
+
+    /**
      * Get user profile (complete with picture)
      */
-    public UserProfileDto getUserProfile(String userId) {
+    public UserProfileDto getUserProfile(UUID userId) {
         log.debug("Fetching profile for user: {}", userId);
 
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
 
+        // NOTE: orElseGet (not orElse) -- orElse evaluates its argument eagerly, so using
+        // orElse here would INSERT a duplicate user_profiles row on every single read and
+        // blow up with a unique-constraint violation as soon as one already existed.
         UserProfile profile = userProfileRepository.findByUserId(userId)
-                .orElse(createDefaultProfile(user));
+                .orElseGet(() -> createDefaultProfile(user));
 
         // Get profile picture
         ProfilePicture profilePicture = profilePictureRepository.findByUserId(userId)
@@ -56,7 +100,8 @@ public class ProfileService {
 
         String avatarUrl;
         if (profilePicture != null) {
-            avatarUrl = profilePicture.getMediumUrl();
+            // Stored value is a storage key; resolve it to a loadable (signed) URL.
+            avatarUrl = resolveImageUrl(profilePicture.getMediumUrl());
         } else {
             // Fallback to Gravatar
             avatarUrl = gravatarService.getGravatarUrl(user.getEmail(), 400);
@@ -76,7 +121,9 @@ public class ProfileService {
                 .company(profile.getCompany())
                 .jobTitle(profile.getJobTitle())
                 .avatarUrl(avatarUrl)
-                .thumbnailUrl(profilePicture != null ? profilePicture.getThumbnailUrl() : gravatarService.getGravatarUrl(user.getEmail(), 150))
+                .thumbnailUrl(profilePicture != null
+                        ? resolveImageUrl(profilePicture.getThumbnailUrl())
+                        : gravatarService.getGravatarUrl(user.getEmail(), 150))
                 .emailNotifications(profile.getEmailNotifications())
                 .twoFactorEnabled(profile.getTwoFactorEnabled())
                 .publicProfile(profile.getPublicProfile())
@@ -90,14 +137,34 @@ public class ProfileService {
     /**
      * Update user profile
      */
-    public UserProfileDto updateProfile(String userId, UpdateProfileRequestDto request) {
+    public UserProfileDto updateProfile(UUID userId, UpdateProfileRequestDto request) {
         log.info("Updating profile for user: {}", userId);
 
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
 
-        UserProfile profile = userProfileRepository.findByUserId(userId)
-                .orElse(createDefaultProfile(user));
+        // Check if profile exists using existsByUserId to avoid Hibernate cache issues
+        boolean profileExists = userProfileRepository.existsByUserId(userId);
+
+        UserProfile profile;
+        if (profileExists) {
+            profile = userProfileRepository.findByUserId(userId)
+                    .orElseThrow(() -> new RuntimeException("Profile exists but couldn't be fetched"));
+            log.debug("Found existing profile for user: {}", userId);
+        } else {
+            log.debug("No existing profile found for user: {}, creating default profile", userId);
+            profile = UserProfile.builder()
+                    .user(user)
+                    .emailNotifications(true)
+                    .twoFactorEnabled(false)
+                    .publicProfile(false)
+                    .showEmailPublically(false)
+                    .totalDocumentsProcessed(0)
+                    .totalAnalysisRequests(0)
+                    .build();
+            profile = userProfileRepository.saveAndFlush(profile);
+            log.debug("Created default profile for user: {}", userId);
+        }
 
         // Update user info
         if (request.getFirstName() != null) {
@@ -140,17 +207,50 @@ public class ProfileService {
         user.setUpdatedAt(LocalDateTime.now());
 
         userRepository.save(user);
-        userProfileRepository.save(profile);
+        userProfileRepository.saveAndFlush(profile);  // ← Change to saveAndFlush
 
         log.info("Profile updated for user: {}", userId);
 
-        return getUserProfile(userId);
+// Build and return DTO without re-querying
+        ProfilePicture profilePicture = profilePictureRepository.findByUserId(userId)
+                .filter(ProfilePicture::getIsActive)
+                .orElse(null);
+
+        String avatarUrl = profilePicture != null
+                ? resolveImageUrl(profilePicture.getMediumUrl())
+                : gravatarService.getGravatarUrl(user.getEmail(), 400);
+
+        return UserProfileDto.builder()
+                .userId(user.getId())
+                .username(user.getUsername())
+                .email(user.getEmail())
+                .firstName(user.getFirstName())
+                .lastName(user.getLastName())
+                .bio(profile.getBio())
+                .phoneNumber(profile.getPhoneNumber())
+                .location(profile.getLocation())
+                .timezone(profile.getTimezone())
+                .website(profile.getWebsite())
+                .company(profile.getCompany())
+                .jobTitle(profile.getJobTitle())
+                .avatarUrl(avatarUrl)
+                .thumbnailUrl(profilePicture != null
+                        ? resolveImageUrl(profilePicture.getThumbnailUrl())
+                        : gravatarService.getGravatarUrl(user.getEmail(), 150))
+                .emailNotifications(profile.getEmailNotifications())
+                .twoFactorEnabled(profile.getTwoFactorEnabled())
+                .publicProfile(profile.getPublicProfile())
+                .totalDocumentsProcessed(profile.getTotalDocumentsProcessed())
+                .totalAnalysisRequests(profile.getTotalAnalysisRequests())
+                .createdAt(user.getCreatedAt())
+                .lastProfileUpdateAt(profile.getLastProfileUpdateAt())
+                .build();
     }
 
     /**
      * Upload profile picture
      */
-    public UserProfileDto uploadProfilePicture(String userId, MultipartFile file, String ipAddress) {
+    public UserProfileDto uploadProfilePicture(UUID userId, MultipartFile file, String ipAddress) {
         log.info("Uploading profile picture for user: {}", userId);
 
         User user = userRepository.findById(userId)
@@ -160,30 +260,36 @@ public class ProfileService {
             // Process image (resize, optimize)
             ImageProcessingResult imageResult = imageService.processProfilePicture(file, userId);
 
-            // Deactivate old picture
-            profilePictureRepository.findByUserId(userId).ifPresent(p -> {
-                p.setIsActive(false);
-                profilePictureRepository.save(p);
-            });
+            // profile_pictures.user_id is UNIQUE (V7 migration): exactly one row per user.
+            // The previous "deactivate old row, then insert a new one" flow violated that
+            // constraint on every re-upload, so the *second* avatar a user ever picked threw a
+            // 500. Update the single row in place instead, and clean up the objects it held.
+            ProfilePicture picture = profilePictureRepository.findByUserId(userId)
+                    .orElseGet(() -> ProfilePicture.builder().user(user).build());
 
-            // Create new profile picture record
-            ProfilePicture newPicture = ProfilePicture.builder()
-                    .user(user)
-                    .originalFileName(imageResult.getOriginalFileName())
-                    .originalFileSize(imageResult.getOriginalFileSize())
-                    .mimeType(imageResult.getMimeType())
-                    .storageKey(imageResult.getFullKey())
-                    .thumbnailUrl(imageResult.getThumbnailKey()) // Would be actual CDN URL
-                    .mediumUrl(imageResult.getMediumKey())
-                    .fullUrl(imageResult.getFullKey())
-                    .width(imageResult.getWidth())
-                    .height(imageResult.getHeight())
-                    .uploadedFrom("web")
-                    .ipAddress(ipAddress)
-                    .isActive(true)
-                    .build();
+            deleteStoredKeys(
+                    picture.getStorageKey(),
+                    picture.getThumbnailUrl(),
+                    picture.getMediumUrl(),
+                    picture.getFullUrl());
 
-            profilePictureRepository.save(newPicture);
+            // These columns store storage KEYS, not URLs. They are turned into
+            // short-lived signed URLs on read (see resolveImageUrl), which is what
+            // lets the storage bucket stay private.
+            picture.setOriginalFileName(imageResult.getOriginalFileName());
+            picture.setOriginalFileSize(imageResult.getOriginalFileSize());
+            picture.setMimeType(imageResult.getMimeType());
+            picture.setStorageKey(imageResult.getFullKey());
+            picture.setThumbnailUrl(imageResult.getThumbnailKey());
+            picture.setMediumUrl(imageResult.getMediumKey());
+            picture.setFullUrl(imageResult.getFullKey());
+            picture.setWidth(imageResult.getWidth());
+            picture.setHeight(imageResult.getHeight());
+            picture.setUploadedFrom("web");
+            picture.setIpAddress(ipAddress);
+            picture.setIsActive(true);
+
+            profilePictureRepository.save(picture);
 
             log.info("Profile picture uploaded successfully for user: {}", userId);
 
@@ -198,7 +304,7 @@ public class ProfileService {
     /**
      * Change password (requires old password)
      */
-    public void changePassword(String userId, ChangePasswordRequestDto request) {
+    public void changePassword(UUID userId, ChangePasswordRequestDto request) {
         log.info("Password change request for user: {}", userId);
 
         User user = userRepository.findById(userId)
@@ -294,13 +400,46 @@ public class ProfileService {
     }
 
     /**
+     * Best-effort removal of image objects that are being replaced.
+     * <p>
+     * Orphaned bytes in a private bucket are a real cost, but failing the user-visible upload
+     * because a cleanup step could not find an object (it may already have been purged, or the
+     * key may never have been written at all) would be worse. Duplicates are collapsed because
+     * {@code storageKey} and {@code fullUrl} intentionally hold the same key.
+     */
+    private void deleteStoredKeys(String... keys) {
+        java.util.Set<String> distinct = new java.util.LinkedHashSet<>();
+        for (String key : keys) {
+            if (key != null && !key.isBlank()) {
+                distinct.add(key);
+            }
+        }
+
+        for (String key : distinct) {
+            try {
+                storageService.deleteFile(key);
+            } catch (Exception e) {
+                log.warn("Could not delete replaced image object {}: {}", key, e.getMessage());
+            }
+        }
+    }
+
+    /**
      * Delete profile picture
      */
-    public void deleteProfilePicture(String userId) {
+    public void deleteProfilePicture(UUID userId) {
         log.info("Deleting profile picture for user: {}", userId);
 
         ProfilePicture picture = profilePictureRepository.findByUserId(userId)
                 .orElseThrow(() -> new UserNotFoundException("No profile picture found"));
+
+        // The columns are NOT NULL, so the row has to stay; drop the actual objects though,
+        // otherwise a deleted avatar keeps costing storage in a bucket nobody can read from.
+        deleteStoredKeys(
+                picture.getStorageKey(),
+                picture.getThumbnailUrl(),
+                picture.getMediumUrl(),
+                picture.getFullUrl());
 
         picture.setIsActive(false);
         profilePictureRepository.save(picture);

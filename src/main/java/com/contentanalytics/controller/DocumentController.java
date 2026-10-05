@@ -5,12 +5,18 @@ import com.contentanalytics.service.DocumentService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/documents")
@@ -36,7 +42,7 @@ public class DocumentController {
             @RequestParam(value = "description", required = false) String description) {
 
         // Get authenticated user
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.info("Document upload request from user: {}", userId);
 
         // Create request DTO
@@ -66,7 +72,7 @@ public class DocumentController {
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "size", defaultValue = "10") int size) {
 
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.debug("Listing documents for user: {} - page: {}, size: {}", userId, page, size);
 
         // Get paginated list
@@ -88,9 +94,9 @@ public class DocumentController {
      */
     @GetMapping("/{documentId}")
     public ResponseEntity<DocumentResponseDto> getDocument(
-            @PathVariable String documentId) {
+            @PathVariable UUID documentId) {
 
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.debug("Fetching document: {} for user: {}", documentId, userId);
 
         // Get document details
@@ -125,7 +131,7 @@ public class DocumentController {
     public ResponseEntity<PaginationResponseDto<DocumentListItemDto>> searchDocuments(
             @Valid @RequestBody DocumentSearchFilterDto filter) {
 
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.info("Search request from user: {} with filters: {}", userId, filter);
 
         // Set defaults if not provided
@@ -158,9 +164,9 @@ public class DocumentController {
      */
     @DeleteMapping("/{documentId}")
     public ResponseEntity<Void> deleteDocument(
-            @PathVariable String documentId) {
+            @PathVariable UUID documentId) {
 
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.info("Delete request for document: {} from user: {}", documentId, userId);
 
         // Delete document
@@ -189,7 +195,7 @@ public class DocumentController {
     @GetMapping("/stats/overview")
     public ResponseEntity<DocumentStatsDto> getDocumentStats() {
 
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.debug("Fetching document stats for user: {}", userId);
 
         // Get stats
@@ -202,29 +208,36 @@ public class DocumentController {
 
     /**
      * GET /api/documents/{documentId}/download
-     * Download original document file
+     * Stream the original document file back to the client.
      *
-     * This endpoint prepares the download response
-     * Frontend handles actual file download
+     * Path parameters:
+     * - documentId: UUID of document to download
+     *
+     * Response: 200 with the raw file as an attachment, or 404 if the document
+     *           does not exist or is not owned by the caller.
      */
     @GetMapping("/{documentId}/download")
-    public ResponseEntity<ApiResponse> getDownloadUrl(
-            @PathVariable String documentId) {
+    public ResponseEntity<Resource> downloadDocument(
+            @PathVariable UUID documentId) {
 
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.info("Download request for document: {} from user: {}", documentId, userId);
 
-        // Verify ownership
-        DocumentResponseDto document = documentService.getDocument(documentId, userId);
+        // Verifies ownership before returning any bytes
+        DownloadFileDto download = documentService.getDocumentForDownload(documentId, userId);
 
-        // In production, generate pre-signed S3 URL or serve from storage
-        ApiResponse response = ApiResponse.builder()
-                .status(HttpStatus.OK.value())
-                .message("Download URL generated")
-                .data(document.getFileName())
-                .build();
+        // Encode the filename so non-ASCII names survive the Content-Disposition header
+        String encodedFileName = URLEncoder.encode(download.getFileName(), StandardCharsets.UTF_8)
+                .replace("+", "%20");
 
-        return ResponseEntity.ok(response);
+        String contentDisposition = "attachment; filename=\"" + download.getFileName() + "\"; "
+                + "filename*=UTF-8''" + encodedFileName;
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, contentDisposition)
+                .header(HttpHeaders.CONTENT_TYPE, download.getContentType())
+                .contentLength(download.getSize() != null ? download.getSize() : 0L)
+                .body(download.getResource());
     }
 
     /**
@@ -235,9 +248,9 @@ public class DocumentController {
      */
     @GetMapping("/{documentId}/status")
     public ResponseEntity<DocumentStatusDto> getDocumentStatus(
-            @PathVariable String documentId) {
+            @PathVariable UUID documentId) {
 
-        String userId = getCurrentUserId();
+        UUID userId = getCurrentUserId();
         log.debug("Fetching status for document: {} from user: {}", documentId, userId);
 
         // Get document
@@ -262,8 +275,8 @@ public class DocumentController {
      * POST /api/documents/{documentId}/retry
      */
     @PostMapping("/{documentId}/retry")
-    public ResponseEntity<ApiResponse> retryProcessing(@PathVariable String documentId) {
-        String userId = getCurrentUserId();
+    public ResponseEntity<ApiResponse> retryProcessing(@PathVariable UUID documentId) {
+        UUID userId = getCurrentUserId();
         log.info("Retry processing request for document: {} from user: {}", documentId, userId);
 
         try {
@@ -291,7 +304,7 @@ public class DocumentController {
     /**
      * Helper method to get current authenticated user ID from JWT claims
      */
-    private String getCurrentUserId() {
+    private UUID getCurrentUserId() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
         if (authentication == null || !authentication.isAuthenticated()) {
@@ -305,17 +318,23 @@ public class DocumentController {
         if (details instanceof java.util.Map) {
             @SuppressWarnings("unchecked")
             java.util.Map<String, Object> detailsMap = (java.util.Map<String, Object>) details;
-            String userId = (String) detailsMap.get("userId");
 
-            if (userId == null) {
+            // ✅ FIX: Convert String to UUID properly
+            String userIdStr = (String) detailsMap.get("userId");
+
+            if (userIdStr == null) {
                 log.error("User ID not found in authentication details");
                 throw new IllegalStateException("User ID not found in authentication");
             }
 
-            return userId;
+            try {
+                return UUID.fromString(userIdStr);  // ← Use UUID.fromString()
+            } catch (IllegalArgumentException e) {
+                log.error("Invalid UUID format: {}", userIdStr);
+                throw new IllegalStateException("Invalid user ID format", e);
+            }
         }
 
         log.error("Invalid authentication details format");
         throw new IllegalStateException("Invalid authentication details");
-    }
-}
+    }  }

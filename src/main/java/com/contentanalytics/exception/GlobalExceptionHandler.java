@@ -190,6 +190,24 @@ public class GlobalExceptionHandler {
 
 
     /**
+     * Handle insufficient credits
+     */
+    @ExceptionHandler(InsufficientCreditsException.class)
+    public ResponseEntity<ErrorResponse> handleInsufficientCredits(
+            InsufficientCreditsException ex,
+            WebRequest request) {
+
+        ErrorResponse errorResponse = ErrorResponse.builder()
+                .timestamp(LocalDateTime.now())
+                .status(HttpStatus.PAYMENT_REQUIRED.value())
+                .message(ex.getMessage())
+                .path(request.getDescription(false).replace("uri=", ""))
+                .build();
+
+        return ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED).body(errorResponse);
+    }
+
+    /**
      * Handle generic exceptions
      */
     @ExceptionHandler(Exception.class)

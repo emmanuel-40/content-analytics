@@ -19,9 +19,9 @@ CREATE TABLE profile_pictures (
 );
 
 -- Create indexes
-CREATE INDEX idx_user_id ON profile_pictures(user_id);
-CREATE INDEX idx_created_at ON profile_pictures(created_at);
-CREATE INDEX idx_is_active ON profile_pictures(is_active);
+CREATE INDEX IF NOT EXISTS idx_user_id ON profile_pictures(user_id);
+CREATE INDEX IF NOT EXISTS idx_created_at ON profile_pictures(created_at);
+CREATE INDEX IF NOT EXISTS idx_is_active ON profile_pictures(is_active);
 
 -- Comment
 COMMENT ON TABLE profile_pictures IS 'User profile pictures with multiple sizes';

@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -21,9 +22,9 @@ public class WebSocketMessage {
     private LocalDateTime timestamp;
 
     // Document info
-    private String documentId;
+    private UUID documentId;
     private String fileName;
-    private String userId;
+    private UUID userId;
 
     // Progress data
     private Float progress; // 0-100%

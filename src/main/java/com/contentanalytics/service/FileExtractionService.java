@@ -52,7 +52,7 @@ public class FileExtractionService {
             } else {
                 throw new RuntimeException("Unsupported file type: " + mimeType);
             }
-
+      
             if (text != null && !text.isBlank()) {
                 log.debug("Text extraction successful. Extracted {} characters", text.length());
             } else {

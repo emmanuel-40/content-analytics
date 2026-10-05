@@ -182,10 +182,35 @@
 			<version>5.0.0</version>
 		</dependency>
 
+		<!-- OpenAPI / Swagger UI -->
+		<dependency>
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+			<version>3.1.1</version>
+		</dependency>
+
+		<!-- Async job queue (RabbitMQ). The app falls back to in-process @Async
+execution when no broker is configured, so RabbitMQ is optional. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-amqp</artifactId>
+		</dependency>
+
 		<!-- Testing -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!--
+			In-memory database used ONLY by tests.
+			`test` scope means it never reaches the runtime classpath, so it cannot be
+			packaged into the deployed jar or accidentally pointed at a real database.
+		-->
+		<dependency>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
 			<scope>test</scope>
 		</dependency>
 
@@ -225,6 +250,55 @@
 					<source>21</source>
 					<target>21</target>
 				</configuration>
+			</plugin>
+			<!--
+				JaCoCo produces the coverage report consumed by CI. Fails the build if
+				instruction coverage drops below the configured floor, preventing silent
+				decay of test coverage over time.
+			-->
+			<plugin>
+				<groupId>org.jacoco</groupId>
+				<artifactId>jacoco-maven-plugin</artifactId>
+				<version>0.8.12</version>
+				<executions>
+					<execution>
+						<id>prepare-agent</id>
+						<goals>
+							<goal>prepare-agent</goal>
+						</goals>
+					</execution>
+					<execution>
+						<id>report</id>
+						<phase>verify</phase>
+						<goals>
+							<goal>report</goal>
+						</goals>
+					</execution>
+					<!--
+						A `check` execution with a minimum threshold is deliberately NOT enabled yet.
+						Current line coverage is roughly 5%, almost all of it in the security and
+						credit-logic classes. A threshold above the real number would fail every
+						build and train everyone to ignore it; one below it would be theatre.
+
+						Re-enable this once integration tests (Testcontainers) lift coverage, e.g.:
+
+						<execution>
+						  <id>check-coverage</id>
+						  <phase>verify</phase>
+						  <goals><goal>check</goal></goals>
+						  <configuration>
+						    <rules><rule>
+						      <element>BUNDLE</element>
+						      <limits><limit>
+						        <counter>LINE</counter>
+						        <value>COVEREDRATIO</value>
+						        <minimum>0.60</minimum>
+						      </limit></limits>
+						    </rule></rules>
+						  </configuration>
+						</execution>
+					-->
+				</executions>
 			</plugin>
 		</plugins>
 	</build>

@@ -5,6 +5,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.UUID;
+
 @Data
 @Builder
 @NoArgsConstructor
@@ -15,7 +17,7 @@ public class TokenResponseDto {
     private String refreshToken;
     private String tokenType;
     private Long expiresIn; // in seconds
-    private String userId;
+    private UUID userId;
     private String username;
     private String email;
 

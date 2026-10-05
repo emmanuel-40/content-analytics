@@ -25,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -41,7 +42,7 @@ public class AuthService {
     private final PasswordResetTokenRepository passwordResetTokenRepository;
     private final TokenGenerationUtil tokenGenerationUtil;
 
-    @Value("${app.frontend.url:http://localhost:3000}")
+    @Value("${app.frontend.url:http://localhost:8080}")
     private String frontendUrl;
 
     @Value("${app.token.email-verification-expiry-hours:24}")
@@ -55,7 +56,7 @@ public class AuthService {
     /**
      * Register new user (updated with email verification)
      */
-    public TokenResponseDto register(RegisterRequestDto request) {
+    public void register(RegisterRequestDto request) {
         // Check if username exists
         if (userRepository.existsByUsername(request.getUsername())) {
             log.warn("Registration attempt with existing username: {}", request.getUsername());
@@ -78,7 +79,7 @@ public class AuthService {
                 .role(UserRole.USER)
                 .status(UserStatus.ACTIVE)
                 .tokenVersion(1)
-                .emailVerified(false) // NOT verified yet
+                .emailVerified(false)                    // NOT verified yet
                 .createdAt(LocalDateTime.now())
                 .updatedAt(LocalDateTime.now())
                 .build();
@@ -102,7 +103,7 @@ public class AuthService {
         log.debug("Email verification token created for user: {}", user.getId());
 
         // Send verification email
-        String verificationLink = frontendUrl + "/verify-email?token=" + verificationToken;
+        String verificationLink = frontendUrl + "/api/auth/verify-email?token=" + verificationToken;  // ✅ Simplified link
         try {
             emailService.sendEmailVerificationLink(
                     user.getEmail(),
@@ -115,8 +116,9 @@ public class AuthService {
             // Don't fail registration if email fails
         }
 
-        // Generate tokens (but user can't fully login until email verified)
-        return generateTokenResponse(user);
+        log.info("User registration complete - awaiting email verification: {}", user.getUsername());
+
+        // NO tokens returned - user must verify email then login
     }
 
     /**
@@ -343,7 +345,7 @@ public class AuthService {
         }
 
         // Extract user ID from token
-        String userId = jwtTokenProvider.getUserIdFromToken(refreshToken);
+        UUID userId = jwtTokenProvider.getUserIdFromToken(refreshToken);
         String username = jwtTokenProvider.getUsernameFromToken(refreshToken);
 
         // Find user in database
@@ -391,7 +393,7 @@ public class AuthService {
      * Increments tokenVersion - all old tokens become invalid
      */
     @CacheEvict(value = "user", key = "#userId")
-    public void invalidateAllTokens(String userId) {
+    public void invalidateAllTokens(UUID userId) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
 
@@ -406,7 +408,7 @@ public class AuthService {
      * Get user by ID (cached for performance)
      */
     @Cacheable(value = "user", key = "#userId", unless = "#result == null")
-    public User getUserById(String userId) {
+    public User getUserById(UUID userId) {
         return userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
     }
@@ -425,7 +427,7 @@ public class AuthService {
      */
     private TokenResponseDto generateTokenResponse(User user) {
         String accessToken = jwtTokenProvider.generateAccessToken(user.getId(), user.getUsername(), user.getEmail());
-        String refreshToken = jwtTokenProvider.generateRefreshToken(user.getId(), user.getUsername());
+        String refreshToken = jwtTokenProvider.generateRefreshToken(user.getId(), user.getUsername(), user.getTokenVersion());
 
         long expiresIn = jwtTokenProvider.getTokenTimeToLive(accessToken);
 

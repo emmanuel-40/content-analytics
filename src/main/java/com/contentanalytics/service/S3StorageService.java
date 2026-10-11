@@ -33,10 +33,10 @@ public class S3StorageService {
     @Value("${app.storage.s3.region:us-east-1}")
     private String region;
 
-    @Value("${app.storage.s3.access-key}")
+    @Value("${app.storage.s3.access-key-id}")
     private String accessKey;
 
-    @Value("${app.storage.s3.secret-key}")
+    @Value("${app.storage.s3.secret-access-key}")
     private String secretKey;
 
     @Value("${app.storage.s3.endpoint:}")

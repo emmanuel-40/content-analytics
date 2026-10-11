@@ -81,6 +81,27 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Handle an identity that cannot be attached to an existing account.
+     * Only reachable outside the OAuth redirect flow - the OAuth adapter converts it
+     * to an OAuth2AuthenticationException first so the browser gets a redirect instead
+     * of a JSON error.
+     */
+    @ExceptionHandler(AccountLinkingException.class)
+    public ResponseEntity<ErrorResponse> handleAccountLinkingException(
+            AccountLinkingException ex,
+            WebRequest request) {
+
+        ErrorResponse errorResponse = ErrorResponse.builder()
+                .timestamp(LocalDateTime.now())
+                .status(HttpStatus.CONFLICT.value())
+                .message(ex.getMessage())
+                .path(request.getDescription(false).replace("uri=", ""))
+                .build();
+
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(errorResponse);
+    }
+
+    /**
      * Handle invalid token
      */
     @ExceptionHandler(InvalidTokenException.class)

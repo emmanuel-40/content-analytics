@@ -42,7 +42,7 @@ public class AuthService {
     private final PasswordResetTokenRepository passwordResetTokenRepository;
     private final TokenGenerationUtil tokenGenerationUtil;
 
-    @Value("${app.frontend.url:http://localhost:8080}")
+    @Value("${app.frontend.url:http://localhost:5173}")
     private String frontendUrl;
 
     @Value("${app.token.email-verification-expiry-hours:24}")
@@ -80,6 +80,7 @@ public class AuthService {
                 .status(UserStatus.ACTIVE)
                 .tokenVersion(1)
                 .emailVerified(false)                    // NOT verified yet
+                .provider(AuthProvider.LOCAL)             // password account
                 .createdAt(LocalDateTime.now())
                 .updatedAt(LocalDateTime.now())
                 .build();
@@ -311,6 +312,16 @@ public class AuthService {
             throw new InvalidTokenException("Please verify your email before logging in");
         }
 
+        // Google-only accounts have no password at all (users.password is NULL since
+        // V11). Guard explicitly: BCrypt would just return false and the user would be
+        // told "invalid credentials" instead of "use Google sign-in", which is not
+        // actionable feedback.
+        if (user.getPassword() == null || user.getPassword().isBlank()) {
+            log.warn("Password login attempted against passwordless account: {}", user.getUsername());
+            throw new InvalidTokenException(
+                    "This account signs in with Google. Use Google sign-in, or reset your password to add one.");
+        }
+
         // Verify password
         if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
             log.warn("Failed login attempt for user: {}", request.getUsername());
@@ -419,6 +430,18 @@ public class AuthService {
     public User getCurrentUser(String username) {
         return userRepository.findByUsername(username)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
+    }
+
+    /**
+     * Mint the access/refresh token pair for a user whose identity has already been
+     * established.
+     * <p>
+     * The three sign-in paths - password login, refresh-token rotation and Google
+     * sign-in - all route through here, so a session opened by OAuth is byte-identical
+     * to one opened with a password from the JWT filter's point of view.
+     */
+    public TokenResponseDto issueTokens(User user) {
+        return generateTokenResponse(user);
     }
 
     /**

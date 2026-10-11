@@ -321,7 +321,12 @@ public class ProfileService {
             throw new IllegalArgumentException("Password can only be changed once per hour");
         }
 
-        // Verify old password
+        // Verify old password - a Google-only account has none to verify against.
+        if (user.getPassword() == null || user.getPassword().isBlank()) {
+            throw new IllegalArgumentException(
+                    "This account signs in with Google and has no password to change. Use Google sign-in.");
+        }
+
         if (!passwordEncoder.matches(request.getOldPassword(), user.getPassword())) {
             log.warn("Incorrect old password for user: {}", userId);
             throw new IllegalArgumentException("Current password is incorrect");

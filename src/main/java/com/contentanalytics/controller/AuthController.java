@@ -36,8 +36,43 @@ public class AuthController {
     private final CookieUtil cookieUtil;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
     private final PasswordResetTokenRepository passwordResetTokenRepository;
+    /**
+     * Placeholder client id meaning "Google sign-in not set up". Kept in sync
+     * with the default in application.properties / application-prod.properties,
+     * so the OAuth2 client bean always exists and the app boots either way.
+     */
+    private static final String UNCONFIGURED_CLIENT_ID = "local-dev-not-configured";
+
     @Value("${jwt.refresh-expiration-days:7}")
     private int refreshExpirationDays;
+
+    /**
+     * Spring's Google registration. Read directly rather than injected as a bean so the
+     * endpoint stays a plain, always-available read of configuration.
+     */
+    @Value("${spring.security.oauth2.client.registration.google.client-id:}")
+    private String googleClientId;
+
+    /**
+     * GET /api/auth/providers
+     * Which external sign-in providers this deployment has credentials for.
+     * <p>
+     * Public: the SPA needs it before anyone has a session, so it can decide whether to
+     * render "Continue with Google". Returns {@code false} while the Google client id
+     * is still the placeholder (local dev without credentials, or prod before the
+     * Render env vars are set), which hides the button instead of sending the
+     * user through a handshake that is guaranteed to fail.
+     */
+    @GetMapping("/providers")
+    public ResponseEntity<Map<String, Boolean>> providers() {
+        return ResponseEntity.ok(Map.of("google", isGoogleConfigured()));
+    }
+
+    private boolean isGoogleConfigured() {
+        return googleClientId != null
+                && !googleClientId.isBlank()
+                && !UNCONFIGURED_CLIENT_ID.equals(googleClientId);
+    }
 
     /**
      * POST /api/auth/register

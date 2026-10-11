@@ -31,18 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
-# Environment/secrets
-.env
-.env.*
-!.env.example
-
-# application.properties is intentionally COMMITTED.
-# It contains development defaults only - every real credential is read from an
-# environment variable (see .env.example). This is the 12-factor approach: config
-# that differs per environment lives in the environment, not in the repository.
-#
-# If you ever place a real secret in it, add a local override file instead:
-#   src/main/resources/application-local.properties  (git-ignored)
 
 # Logs
 *.log

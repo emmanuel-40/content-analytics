@@ -2,6 +2,7 @@ package com.contentanalytics.config;
 
 import com.contentanalytics.interceptor.WebSocketInterceptor;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.ChannelRegistration;
 import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
@@ -18,20 +19,30 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     private final WebSocketInterceptor webSocketInterceptor;
 
     /**
+     * Browser origins allowed to open a socket. Read from
+     * {@code app.websocket.allowed-origins} (not hardcoded) so the Vite dev
+     * server and the deployed SPA are governed by the same properties files
+     * as CORS - change it in one place.
+     */
+    @Value("${app.websocket.allowed-origins:http://localhost:5173}")
+    private String allowedOrigins;
+
+    /**
      * Register STOMP endpoints
      */
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        String[] origins = allowedOrigins.split(",");
         registry.addEndpoint("/ws/documents")
-                .setAllowedOrigins("http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000")
+                .setAllowedOrigins(origins)
                 .withSockJS();
 
         registry.addEndpoint("/ws/notifications")
-                .setAllowedOrigins("http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000")
+                .setAllowedOrigins(origins)
                 .withSockJS();
 
         registry.addEndpoint("/ws/analytics")
-                .setAllowedOrigins("http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000")
+                .setAllowedOrigins(origins)
                 .withSockJS();
     }
 

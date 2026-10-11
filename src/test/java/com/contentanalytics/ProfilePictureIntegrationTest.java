@@ -1,6 +1,7 @@
 package com.contentanalytics;
 
 import com.contentanalytics.dto.UserProfileDto;
+import com.contentanalytics.entity.AuthProvider;
 import com.contentanalytics.entity.ProfilePicture;
 import com.contentanalytics.entity.User;
 import com.contentanalytics.entity.UserRole;
@@ -86,6 +87,7 @@ class ProfilePictureIntegrationTest {
                 .status(UserStatus.ACTIVE)
                 .tokenVersion(1)
                 .emailVerified(true)
+                .provider(AuthProvider.LOCAL)
                 .build());
     }
 

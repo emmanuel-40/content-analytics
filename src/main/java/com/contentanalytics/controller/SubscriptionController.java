@@ -74,8 +74,14 @@ public class SubscriptionController {
     /**
      * POST /api/subscription/purchase-credits
      * Buy additional credits (pay-as-you-go). Purchased credits survive the monthly reset.
+     * <p>
+     * ADMIN/TEST ONLY. This endpoint grants credits without money moving and
+     * exists so integration tests and local demos can seed balances. Real
+     * purchases flow through {@code POST /api/payments/initialize} and are
+     * credited by the verified Paystack webhook - never by this endpoint.
      */
     @PostMapping("/purchase-credits")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse> purchaseCredits(
             @Valid @RequestBody PurchaseCreditsRequestDto request) {
 

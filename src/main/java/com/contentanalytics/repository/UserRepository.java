@@ -1,5 +1,6 @@
 package com.contentanalytics.repository;
 
+import com.contentanalytics.entity.AuthProvider;
 import com.contentanalytics.entity.User;
 import com.contentanalytics.entity.UserStatus;
 import org.springframework.data.domain.Page;
@@ -31,6 +32,10 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     // Check if email exists
     boolean existsByEmail(String email);
+
+    // Find an account by the identity it is linked to (e.g. Google's `sub` claim).
+    // Runs on every OAuth callback so returning users land on the same row.
+    Optional<User> findByProviderAndProviderSubject(AuthProvider provider, String providerSubject);
 
     // Find all active users with pagination
     Page<User> findByStatus(UserStatus status, Pageable pageable);

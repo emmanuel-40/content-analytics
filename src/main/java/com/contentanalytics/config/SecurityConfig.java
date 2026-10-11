@@ -1,6 +1,9 @@
 package com.contentanalytics.config;
 
+import com.contentanalytics.security.GoogleOAuth2UserService;
 import com.contentanalytics.security.JwtAuthenticationFilter;
+import com.contentanalytics.security.OAuth2LoginFailureHandler;
+import com.contentanalytics.security.OAuth2LoginSuccessHandler;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -10,8 +13,6 @@ import org.springframework.security.config.annotation.authentication.configurati
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
@@ -26,12 +27,13 @@ public class SecurityConfig {
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
     /**
-     * Password encoder with 12 rounds (strong hashing)
+     * Google sign-in. The user service links the Google identity onto a {@code users}
+     * row; the two handlers translate the result into the same JWT cookies the
+     * password flow issues, so nothing downstream learns that OAuth was involved.
      */
-    @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder(12);
-    }
+    private final GoogleOAuth2UserService googleOAuth2UserService;
+    private final OAuth2LoginSuccessHandler oAuth2LoginSuccessHandler;
+    private final OAuth2LoginFailureHandler oAuth2LoginFailureHandler;
 
     /**
      * Authentication manager for processing authentication
@@ -108,6 +110,19 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/auth/reset-password").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/auth/verify-token/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/auth/csrf").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/auth/providers").permitAll()
+
+                        // Google sign-in handshake. Both legs are GETs driven by the
+                        // browser: the entry point that redirects to Google, and the
+                        // callback Google redirects back to. Nothing here accepts state.
+                        .requestMatchers("/oauth2/**", "/login/oauth2/**").permitAll()
+
+                        // Payments: the Paystack webhook is called by Paystack's
+                        // servers (no login possible) and is protected by HMAC over
+                        // the raw body instead; the status flag must be public so the
+                        // pricing page can hide the Buy button before login.
+                        .requestMatchers(HttpMethod.POST, "/api/payments/webhook").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/payments/status").permitAll()
 
                         // Protected endpoints (need JWT)
                         .requestMatchers(HttpMethod.POST, "/api/auth/logout").authenticated()
@@ -134,6 +149,27 @@ public class SecurityConfig {
 
                         // Everything else protected
                         .anyRequest().authenticated()
+                )
+                // Google sign-in (authorization-code flow).
+                //
+                // Spring Security owns the OAuth plumbing: it builds the consent URL,
+                // stores the authorization request (including `state` and `nonce`) for
+                // the duration of the redirect, swaps the code for tokens, and fetches
+                // userinfo. We only supply what happens next.
+                //
+                // The authorization request lives in a short-lived HTTP session for the
+                // ~2 seconds the user spends on Google's page. That is not a contradiction
+                // of SessionCreationPolicy.STATELESS below: STATELESS means Spring Security
+                // never restores a SecurityContext from the session, and the JWT filter
+                // still authenticates every API call from the access-token cookie. No
+                // session is read after the handshake completes.
+                .oauth2Login(oauth2 -> oauth2
+                        // Link the Google identity to a users row (find-or-create by
+                        // verified email) before the success handler runs.
+                        .userInfoEndpoint(userInfo -> userInfo
+                                .userService(googleOAuth2UserService))
+                        .successHandler(oAuth2LoginSuccessHandler)
+                        .failureHandler(oAuth2LoginFailureHandler)
                 )
                 // Add JWT filter before authentication filter
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)

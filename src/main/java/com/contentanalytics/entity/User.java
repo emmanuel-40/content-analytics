@@ -30,8 +30,26 @@ public class User {
     @Column(nullable = false, unique = true, length = 255)
     private String email;
 
-    @Column(nullable = false)
-    private String password; // Hashed with bcrypt
+    // Hashed with bcrypt. NULL for accounts created by an identity provider
+    // (Google sign-up) that never set a password - see V11 migration.
+    @Column
+    private String password;
+
+    /**
+     * Where this account's credentials come from: {@link AuthProvider#LOCAL} for a
+     * password account, {@link AuthProvider#GOOGLE} once the row has been linked to
+     * a Google identity.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private AuthProvider provider;
+
+    /**
+     * Google's immutable {@code sub} claim. Unique among Google accounts, {@code null}
+     * for accounts that have never signed in through an identity provider.
+     */
+    @Column(length = 64)
+    private String providerSubject;
 
     @Column(length = 255)
     private String firstName;

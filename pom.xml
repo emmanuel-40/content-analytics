@@ -46,6 +46,19 @@
 			<artifactId>spring-boot-starter-security</artifactId>
 		</dependency>
 
+		<!--
+			OAuth2 client - Google sign-in.
+			Only the authorization-code flow is used (no password grant, no implicit
+			flow). Spring Security builds the consent/redirect URL, validates `state`
+			and `nonce`, and exchanges the code for tokens; we then map the resulting
+			identity onto our own users table and mint a normal JWT, so OAuth adds no
+			second authentication path to the rest of the API.
+		-->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-oauth2-client</artifactId>
+		</dependency>
+
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-validation</artifactId>
@@ -200,6 +213,18 @@ execution when no broker is configured, so RabbitMQ is optional. -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!--
+			MockMvc slice for the GoogleOAuthIntegrationTest browser-surface assertions
+			(GET /api/auth/providers, /oauth2/** handshake legs). Spring Boot 4 moved
+			web-layer test auto-configuration out of spring-boot-starter-test into its
+			own starter, so this is declared explicitly rather than assumed.
+		-->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webmvc-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 

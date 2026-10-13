@@ -37,12 +37,6 @@ public class UpdateProfileRequestDto {
     )
     private String website;
 
-    @Size(max = 100, message = "Company must not exceed 100 characters")
-    private String company;
-
-    @Size(max = 100, message = "Job title must not exceed 100 characters")
-    private String jobTitle;
-
     private Boolean emailNotifications;
 
     private Boolean publicProfile;

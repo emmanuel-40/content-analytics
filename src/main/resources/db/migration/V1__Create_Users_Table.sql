@@ -19,11 +19,11 @@ CREATE TABLE users (
 );
 
 -- Create indexes
-CREATE INDEX IF NOT EXISTS idx_username ON users(username);
-CREATE INDEX IF NOT EXISTS idx_email ON users(email);
-CREATE INDEX IF NOT EXISTS idx_status ON users(status);
-CREATE INDEX IF NOT EXISTS idx_email_verified ON users(email_verified);
-CREATE INDEX IF NOT EXISTS idx_created_at ON users(created_at);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users(email_verified);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
 
 -- Comments
 COMMENT ON TABLE users IS 'User accounts with authentication and profile data';

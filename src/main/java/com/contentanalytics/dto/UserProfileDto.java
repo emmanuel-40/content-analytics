@@ -29,8 +29,6 @@ public class UserProfileDto {
     private String location;
     private String timezone;
     private String website;
-    private String company;
-    private String jobTitle;
 
     // Avatar URLs
     private String avatarUrl; // Medium size (400x400)

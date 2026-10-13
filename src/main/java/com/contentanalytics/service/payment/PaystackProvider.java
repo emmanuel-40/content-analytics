@@ -139,6 +139,11 @@ public class PaystackProvider implements PaymentProvider {
     /** Public key is safe to expose to the SPA (it only opens the popup). */
     public String getPublicKey() { return publicKey == null ? "" : publicKey; }
 
+    /** False while no secret key is configured - the SPA hides Buy until then. */
+    public boolean isConfigured() {
+        return secretKey != null && !secretKey.isBlank();
+    }
+
     private void requireConfigured() {
         if (secretKey == null || secretKey.isBlank()) {
             throw new IllegalStateException(

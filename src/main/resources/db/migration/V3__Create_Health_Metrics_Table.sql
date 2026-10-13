@@ -12,9 +12,9 @@ CREATE TABLE health_metrics (
 );
 
 -- Create indexes
-CREATE INDEX IF NOT EXISTS idx_check_type ON health_metrics(check_type);
-CREATE INDEX IF NOT EXISTS idx_created_at ON health_metrics(created_at);
-CREATE INDEX IF NOT EXISTS idx_status ON health_metrics(status);
+CREATE INDEX IF NOT EXISTS idx_health_metrics_check_type ON health_metrics(check_type);
+CREATE INDEX IF NOT EXISTS idx_health_metrics_created_at ON health_metrics(created_at);
+CREATE INDEX IF NOT EXISTS idx_health_metrics_status ON health_metrics(status);
 
 -- Comment
 COMMENT ON TABLE health_metrics IS 'Application health check metrics for monitoring and alerting';

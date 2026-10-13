@@ -10,8 +10,8 @@ import java.util.UUID;
 
 @Entity
 @Table(name = "user_profiles", indexes = {
-        @Index(name = "idx_user_id", columnList = "user_id", unique = true),
-        @Index(name = "idx_updated_at", columnList = "updated_at")
+        @Index(name = "idx_user_profiles_user_id", columnList = "user_id", unique = true),
+        @Index(name = "idx_user_profiles_updated_at", columnList = "updated_at")
 })
 @Data
 @NoArgsConstructor
@@ -42,12 +42,6 @@ public class UserProfile {
 
     @Column(length = 255)
     private String website; // Personal website
-
-    @Column(length = 255)
-    private String company; // Where they work
-
-    @Column(length = 100)
-    private String jobTitle;
 
     // Preferences
     @Column(nullable = false)

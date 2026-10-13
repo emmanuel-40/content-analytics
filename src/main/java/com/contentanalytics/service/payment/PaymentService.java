@@ -37,10 +37,7 @@ public class PaymentService {
     private final PaymentTransactionRepository paymentRepository;
     private final UserRepository userRepository;
     private final CreditService creditService;
-    private final List<PaymentProvider> providers;
-
-    @Value("${app.payments.provider:paystack}")
-    private String configuredProvider;
+    private final PaystackProvider paystack;
 
     @Value("${app.payments.callback-url:http://localhost:5173/payment/callback}")
     private String callbackUrl;
@@ -66,7 +63,7 @@ public class PaymentService {
                 .orElseThrow(() -> new IllegalArgumentException("User not found"));
 
         String reference = "ca-" + UUID.randomUUID();
-        PaymentProvider provider = activeProvider();
+        PaymentProvider provider = paystack;
 
         PaymentTransaction tx = PaymentTransaction.builder()
                 .user(user)
@@ -103,7 +100,7 @@ public class PaymentService {
      */
     @Transactional
     public java.util.Optional<String> handleWebhook(String rawBody, String signature) {
-        PaymentProvider provider = activeProvider();
+        PaymentProvider provider = paystack;
 
         if (!provider.verifyWebhookSignature(rawBody, signature)) {
             log.warn("Rejected webhook with bad signature (provider {})", provider.getName());
@@ -142,7 +139,7 @@ public class PaymentService {
             return java.util.Optional.empty();
         }
 
-        PaymentProvider.VerifyResult confirmed = activeProvider().verify(reference);
+        PaymentProvider.VerifyResult confirmed = paystack.verify(reference);
         if (!confirmed.paid()) {
             tx.setStatus(PaymentStatus.FAILED);
             tx.setRawWebhook(rawWebhook);
@@ -197,23 +194,6 @@ public class PaymentService {
      * of opening a checkout that is guaranteed to fail.
      */
     public boolean isConfigured() {
-        try {
-            activeProvider();
-            return true;
-        } catch (IllegalStateException e) {
-            return false;
-        }
-    }
-
-    private PaymentProvider activeProvider() {
-        if ("mock".equalsIgnoreCase(configuredProvider)) {
-            return providers.stream()
-                    .filter(p -> p instanceof MockPaymentProvider)
-                    .findFirst().orElseThrow();
-        }
-        return providers.stream()
-                .filter(p -> p.getName().equalsIgnoreCase(configuredProvider))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("Unknown payment provider: " + configuredProvider));
+        return paystack.isConfigured();
     }
 }

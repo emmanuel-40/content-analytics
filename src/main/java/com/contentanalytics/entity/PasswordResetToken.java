@@ -9,9 +9,9 @@ import java.util.UUID;
 
 @Entity
 @Table(name = "password_reset_tokens", indexes = {
-        @Index(name = "idx_user_id", columnList = "user_id"),
-        @Index(name = "idx_token", columnList = "token", unique = true),
-        @Index(name = "idx_created_at", columnList = "created_at")
+        @Index(name = "idx_password_reset_tokens_user_id", columnList = "user_id"),
+        @Index(name = "idx_password_reset_tokens_token", columnList = "token", unique = true),
+        @Index(name = "idx_password_reset_tokens_created_at", columnList = "created_at")
 })
 @Data
 @NoArgsConstructor

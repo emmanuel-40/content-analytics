@@ -10,8 +10,8 @@ CREATE TABLE password_history (
 );
 
 -- Create indexes
-CREATE INDEX IF NOT EXISTS idx_user_id ON password_history(user_id);
-CREATE INDEX IF NOT EXISTS idx_created_at ON password_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_password_history_user_id ON password_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_history_created_at ON password_history(created_at);
 
 -- Comment
 COMMENT ON TABLE password_history IS 'Audit trail for password changes';

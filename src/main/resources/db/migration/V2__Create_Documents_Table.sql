@@ -25,11 +25,11 @@ CREATE TABLE documents (
 );
 
 -- Create indexes for performance
-CREATE INDEX IF NOT EXISTS idx_user_id ON documents(user_id);
-CREATE INDEX IF NOT EXISTS idx_status ON documents(status);
-CREATE INDEX IF NOT EXISTS idx_created_at ON documents(created_at);
-CREATE INDEX IF NOT EXISTS idx_file_name ON documents(file_name);
-CREATE INDEX IF NOT EXISTS idx_sentiment ON documents(sentiment);
+CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id);
+CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
+CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at);
+CREATE INDEX IF NOT EXISTS idx_documents_file_name ON documents(file_name);
+CREATE INDEX IF NOT EXISTS idx_documents_sentiment ON documents(sentiment);
 
 -- Comments
 COMMENT ON TABLE documents IS 'User documents with AI analysis metadata';

@@ -10,8 +10,8 @@ import java.util.UUID;
 
 @Entity
 @Table(name = "profile_pictures", indexes = {
-        @Index(name = "idx_user_id", columnList = "user_id", unique = true),
-        @Index(name = "idx_created_at", columnList = "created_at")
+        @Index(name = "idx_profile_pictures_user_id", columnList = "user_id", unique = true),
+        @Index(name = "idx_profile_pictures_created_at", columnList = "created_at")
 })
 @Data
 @NoArgsConstructor

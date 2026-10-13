@@ -9,8 +9,8 @@ import java.util.UUID;
 
 @Entity
 @Table(name = "health_metrics", indexes = {
-        @Index(name = "idx_check_type", columnList = "check_type"),
-        @Index(name = "idx_created_at", columnList = "created_at")
+        @Index(name = "idx_health_metrics_check_type", columnList = "check_type"),
+        @Index(name = "idx_health_metrics_created_at", columnList = "created_at")
 })
 @Data
 @NoArgsConstructor

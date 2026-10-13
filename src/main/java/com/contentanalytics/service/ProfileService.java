@@ -118,8 +118,6 @@ public class ProfileService {
                 .location(profile.getLocation())
                 .timezone(profile.getTimezone())
                 .website(profile.getWebsite())
-                .company(profile.getCompany())
-                .jobTitle(profile.getJobTitle())
                 .avatarUrl(avatarUrl)
                 .thumbnailUrl(profilePicture != null
                         ? resolveImageUrl(profilePicture.getThumbnailUrl())
@@ -190,12 +188,6 @@ public class ProfileService {
         if (request.getWebsite() != null) {
             profile.setWebsite(request.getWebsite());
         }
-        if (request.getCompany() != null) {
-            profile.setCompany(request.getCompany());
-        }
-        if (request.getJobTitle() != null) {
-            profile.setJobTitle(request.getJobTitle());
-        }
         if (request.getEmailNotifications() != null) {
             profile.setEmailNotifications(request.getEmailNotifications());
         }
@@ -231,8 +223,6 @@ public class ProfileService {
                 .location(profile.getLocation())
                 .timezone(profile.getTimezone())
                 .website(profile.getWebsite())
-                .company(profile.getCompany())
-                .jobTitle(profile.getJobTitle())
                 .avatarUrl(avatarUrl)
                 .thumbnailUrl(profilePicture != null
                         ? resolveImageUrl(profilePicture.getThumbnailUrl())

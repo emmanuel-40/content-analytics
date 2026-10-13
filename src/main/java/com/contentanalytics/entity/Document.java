@@ -10,10 +10,10 @@ import java.util.UUID;
 
 @Entity
 @Table(name = "documents", indexes = {
-        @Index(name = "idx_user_id", columnList = "user_id"),
-        @Index(name = "idx_status", columnList = "status"),
-        @Index(name = "idx_created_at", columnList = "created_at"),
-        @Index(name = "idx_file_name", columnList = "file_name")
+        @Index(name = "idx_documents_user_id", columnList = "user_id"),
+        @Index(name = "idx_documents_status", columnList = "status"),
+        @Index(name = "idx_documents_created_at", columnList = "created_at"),
+        @Index(name = "idx_documents_file_name", columnList = "file_name")
 })
 @Data
 @NoArgsConstructor

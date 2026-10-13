@@ -10,10 +10,10 @@ CREATE TABLE password_reset_tokens (
 );
 
 -- Create indexes
-CREATE INDEX IF NOT EXISTS idx_token ON password_reset_tokens(token);
-CREATE INDEX IF NOT EXISTS idx_user_id ON password_reset_tokens(user_id);
-CREATE INDEX IF NOT EXISTS idx_created_at ON password_reset_tokens(created_at);
-CREATE INDEX IF NOT EXISTS idx_expiry_date ON password_reset_tokens(expiry_date);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_created_at ON password_reset_tokens(created_at);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expiry_date ON password_reset_tokens(expiry_date);
 
 -- Comment
 COMMENT ON TABLE password_reset_tokens IS 'Password reset tokens for user account recovery';

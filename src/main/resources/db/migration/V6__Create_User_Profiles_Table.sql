@@ -21,8 +21,8 @@ CREATE TABLE user_profiles (
 );
 
 -- Create indexes
-CREATE INDEX IF NOT EXISTS idx_user_id ON user_profiles(user_id);
-CREATE INDEX IF NOT EXISTS idx_updated_at ON user_profiles(updated_at);
+CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_profiles_updated_at ON user_profiles(updated_at);
 
 -- Comment
 COMMENT ON TABLE user_profiles IS 'Extended user profile information beyond basic auth';

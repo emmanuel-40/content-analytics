@@ -5,11 +5,14 @@ import java.util.Map;
 /**
  * Payment gateway abstraction.
  * <p>
- * The rest of the backend only talks to this interface, so swapping or adding
- * a provider (Paystack today, Stripe later) is a new implementation class, not
- * a rewrite of the checkout flow. Implementations must never grant credits
- * themselves - they report what the provider said, and
- * {@code PaymentService} decides what to persist.
+ * Today Paystack is the only implementation. The interface exists so the
+ * checkout flow ({@code PaymentService}) never touches provider HTTP details
+ * directly - a second provider later is a new class, not a rewrite. The test
+ * suite also implements this interface with a scripted stub (no network), so
+ * the money-safety rules are asserted without calling Paystack.
+ * <p>
+ * Implementations must never grant credits themselves - they report what the
+ * provider said, and {@code PaymentService} decides what to persist.
  */
 public interface PaymentProvider {
 

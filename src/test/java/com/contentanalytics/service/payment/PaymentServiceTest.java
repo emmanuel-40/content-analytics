@@ -57,8 +57,7 @@ class PaymentServiceTest {
     @BeforeEach
     void setUp() {
         stub = new StubProvider();
-        ReflectionTestUtils.setField(paymentService, "providers", java.util.List.of(stub));
-        ReflectionTestUtils.setField(paymentService, "configuredProvider", "STUB");
+        ReflectionTestUtils.setField(paymentService, "paystack", stub);
 
         // Cleanup order matters (FK): payments and ledger rows first, then
         // subscriptions, then users. References are random UUIDs so cleanup is
@@ -228,8 +227,8 @@ class PaymentServiceTest {
         return creditTransactionRepository.findByUserIdAndType(user.getId(), type).size();
     }
 
-    /** Stub provider: no network, behavior scripted per test via fields. */
-    static class StubProvider implements PaymentProvider {
+    /** Stub Paystack: no network, behavior scripted per test via fields. */
+    static class StubProvider extends PaystackProvider {
         boolean paid;
         int paidAmountKobo;
         String nextCheckoutUrl = "https://paystack.test/pay/x";

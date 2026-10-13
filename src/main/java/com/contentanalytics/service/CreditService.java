@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -35,6 +36,13 @@ public class CreditService {
     private final UserRepository userRepository;
 
     /**
+     * Injectable time source. Spring supplies {@link Clock#systemUTC()} in production; tests
+     * swap in {@link Clock#fixed} so period boundaries ({@code now}, {@code now + 30d}) are exact
+     * and never race the wall clock.
+     */
+    private final Clock clock;
+
+    /**
      * Fetch (or lazily create) a user's subscription, rolling the period forward if elapsed.
      */
     @Transactional
@@ -42,7 +50,7 @@ public class CreditService {
         Subscription subscription = subscriptionRepository.findByUserId(userId)
                 .orElseGet(() -> createFreeSubscription(userId));
 
-        if (subscription.getPeriodEnd().isBefore(LocalDateTime.now())) {
+        if (subscription.getPeriodEnd().isBefore(LocalDateTime.now(clock))) {
             rollPeriod(subscription);
         }
 
@@ -59,8 +67,8 @@ public class CreditService {
                 .monthlyCreditAllowance(SubscriptionTier.FREE.getMonthlyCredits())
                 .creditsUsedThisPeriod(0)
                 .purchasedCredits(0)
-                .periodStart(LocalDateTime.now())
-                .periodEnd(LocalDateTime.now().plusDays(30))
+                .periodStart(LocalDateTime.now(clock))
+                .periodEnd(LocalDateTime.now(clock).plusDays(30))
                 .status(SubscriptionStatus.ACTIVE)
                 .autoRenew(true)
                 .build();
@@ -86,7 +94,7 @@ public class CreditService {
         log.info("Rolling credit period for user: {} (tier: {})", subscription.getUser().getId(),
                 subscription.getTier());
 
-        subscription.rollPeriod(allowance);
+        subscription.rollPeriod(allowance, LocalDateTime.now(clock));
         subscriptionRepository.save(subscription);
 
         recordTransaction(subscription, allowance, CreditTransactionType.MONTHLY_ALLOCATION,
@@ -108,7 +116,7 @@ public class CreditService {
         Subscription subscription = subscriptionRepository.findByUserIdForUpdate(userId)
                 .orElseGet(() -> createFreeSubscription(userId));
 
-        if (subscription.getPeriodEnd().isBefore(LocalDateTime.now())) {
+        if (subscription.getPeriodEnd().isBefore(LocalDateTime.now(clock))) {
             rollPeriod(subscription);
         }
 
@@ -165,7 +173,7 @@ public class CreditService {
                 .orElseGet(() -> createFreeSubscription(userId));
 
         subscription.setTier(tier);
-        subscription.rollPeriod(tier.getMonthlyCredits());
+        subscription.rollPeriod(tier.getMonthlyCredits(), LocalDateTime.now(clock));
         subscriptionRepository.save(subscription);
 
         recordTransaction(subscription, tier.getMonthlyCredits(), CreditTransactionType.ADMIN_ADJUSTMENT,

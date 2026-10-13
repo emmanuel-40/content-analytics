@@ -3,10 +3,20 @@ package com.contentanalytics.entity;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 @DisplayName("Subscription credit accounting")
 class SubscriptionTest {
+
+    // One frozen clock for the whole class: every "now" in these tests comes from this
+    // exact instant, so period math is identical on every run regardless of the wall clock.
+    private static final LocalDateTime NOW = LocalDateTime.of(2026, 1, 15, 9, 30);
+    private static final Clock FIXED_CLOCK = Clock.fixed(
+            NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
 
     private Subscription subscription(SubscriptionTier tier, int used, int purchased) {
         return Subscription.builder()
@@ -44,7 +54,12 @@ class SubscriptionTest {
     void rollPeriodPreservesPurchasedCredits() {
         Subscription subscription = subscription(SubscriptionTier.PREMIUM, 90, 50);
 
-        subscription.rollPeriod(SubscriptionTier.PREMIUM.getMonthlyCredits());
+        // Deterministic time: freeze the clock so the new period window is an exact,
+        // known value. This is why rollPeriod() takes "now" as a parameter instead of
+        // reading the system clock - no wall-clock flakiness, and we can assert the
+        // precise boundaries rather than a loose "is after" check.
+        LocalDateTime now = LocalDateTime.now(FIXED_CLOCK);
+        subscription.rollPeriod(SubscriptionTier.PREMIUM.getMonthlyCredits(), now);
 
         assertThat(subscription.getCreditsUsedThisPeriod()).isZero();
         assertThat(subscription.getMonthlyCreditAllowance()).isEqualTo(100);
@@ -52,6 +67,10 @@ class SubscriptionTest {
                 .as("purchased credits must survive the reset - the user paid for them")
                 .isEqualTo(50);
         assertThat(subscription.getAvailableCredits()).isEqualTo(150);
+        assertThat(subscription.getPeriodStart()).isEqualTo(now);
+        assertThat(subscription.getPeriodEnd())
+                .as("a 30-day period measured from the frozen instant")
+                .isEqualTo(now.plusDays(30));
     }
 
     @Test
@@ -60,7 +79,10 @@ class SubscriptionTest {
         Subscription subscription = subscription(SubscriptionTier.FREE, 5, 0);
 
         subscription.setTier(SubscriptionTier.ENTERPRISE);
-        subscription.rollPeriod(SubscriptionTier.ENTERPRISE.getMonthlyCredits());
+        // Same frozen clock as above; the boundary assertions here only care about
+        // the allowance reset, but passing a fixed instant keeps the test deterministic.
+        subscription.rollPeriod(SubscriptionTier.ENTERPRISE.getMonthlyCredits(),
+                LocalDateTime.now(FIXED_CLOCK));
 
         assertThat(subscription.getAvailableCredits()).isEqualTo(1000);
     }

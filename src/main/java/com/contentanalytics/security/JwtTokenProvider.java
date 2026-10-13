@@ -2,6 +2,7 @@ package com.contentanalytics.security;
 
 import com.contentanalytics.exception.InvalidTokenException;
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
@@ -11,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
+import java.time.Clock;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -29,6 +31,16 @@ public class JwtTokenProvider {
 
     @Value("${app.jwt.refresh.expiration}")
     private long refreshTokenExpirationMs; // Refresh token expiration (7 days)
+
+    /**
+     * Single source of "now" for stamping and checking token times.
+     * <p>
+     * Injected rather than calling {@code new Date()} / {@code System.currentTimeMillis()}
+     * directly so tests can pin it to a fixed instant: issued-at and expiry become exact,
+     * assertable values, and "is this token expired?" can be stepped across its boundary
+     * without any sleep or wall-clock race.
+     */
+    private final Clock clock;
 
     /**
      * Generate Access Token (short-lived)
@@ -63,7 +75,8 @@ public class JwtTokenProvider {
      * Create JWT token with claims
      */
     private String createToken(Map<String, Object> claims, String subject, long expirationTime) {
-        Date now = new Date();
+        // "now" comes from the injected Clock so issued-at / expiry are deterministic under test.
+        Date now = new Date(clock.millis());
         Date expiryDate = new Date(now.getTime() + expirationTime);
 
         SecretKey key = Keys.hmacShaKeyFor(jwtSecret.getBytes());
@@ -78,7 +91,16 @@ public class JwtTokenProvider {
     }
 
     /**
-     * Extract claims from token
+     * Extract claims from token.
+     * <p>
+     * Signature is always verified. Expiry, however, is <em>not</em> enforced here: a
+     * validly-signed token whose {@code exp} is in the past still returns its claims, and
+     * the accept/reject decision is made by {@link #isTokenExpired(Claims)} against the
+     * injected {@link Clock}. That keeps "now" in one place (the clock) instead of the JWT
+     * library silently consulting the JVM wall clock, so expiry is deterministic and testable.
+     * A bad signature or malformed token still returns {@code null}; every real call path
+     * ({@code JwtAuthenticationFilter}, {@code WebSocketInterceptor}, {@code AuthService})
+     * gates on {@link #validateToken(String)} first, which combines both checks.
      */
     public Claims getClaimsFromToken(String token) {
         try {
@@ -88,6 +110,11 @@ public class JwtTokenProvider {
                     .build()
                     .parseClaimsJws(token)
                     .getBody();
+        } catch (ExpiredJwtException e) {
+            // Signature was valid; only the exp check (JVM wall clock) failed. Return the
+            // claims so expiry is judged by isTokenExpired()/the injected Clock instead.
+            log.debug("Token past its exp per the library clock; deferring expiry to the injected Clock");
+            return e.getClaims();
         } catch (Exception e) {
             log.error("Error extracting claims from token", e);
             return null;
@@ -164,7 +191,7 @@ public class JwtTokenProvider {
      * Check if token is expired
      */
     public boolean isTokenExpired(Claims claims) {
-        return claims.getExpiration().before(new Date());
+        return claims.getExpiration().before(new Date(clock.millis()));
     }
 
     /**
@@ -175,7 +202,7 @@ public class JwtTokenProvider {
         if (claims == null) return 0;
 
         long expirationTime = claims.getExpiration().getTime();
-        long currentTime = System.currentTimeMillis();
+        long currentTime = clock.millis();
         return (expirationTime - currentTime) / 1000;
     }
 

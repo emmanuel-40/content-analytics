@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# Continuous Integration
+#
+# What this does on every push to `main`/`development` and on every pull
+# request into them:
+#   1. checks out the code
+#   2. installs JDK 21 (the project's target) with a warmed Maven cache
+#   3. compiles, runs the full test suite and builds the jar in one shot
+#      (`clean verify`) - tests run on H2 in-memory, so no Postgres/Redis
+#      services have to be provisioned
+#   4. uploads the built jar + JaCoCo coverage report as downloadable
+#      artifacts so the result of any run is inspectable
+#
+# The green check on the commit / the badge in the README is the signal
+# recruiters look for: "does this repo build and pass its tests from a
+# clean checkout?" - this file is what makes that true automatically.
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+# A new push cancels the previous in-progress run so we never pay twice for
+# superseded commits and the status always reflects the latest code.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test (JDK 21)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin) with Maven cache
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Make Maven wrapper executable
+        # Windows-created checkouts can drop the exec bit; guarantee it so
+        # `./mvnw` runs on the Linux runner regardless of how the repo was cloned.
+        run: chmod +x ./mvnw
+
+      - name: Build, test and package
+        # -B            : batch mode (no interactive prompts / color, CI-friendly)
+        # clean verify  : compiles, runs every test, then produces the jar and
+        #                 the JaCoCo report. The coverage `check` gate is off in
+        #                 pom.xml on purpose, so this fails only on a real error.
+        run: ./mvnw -B clean verify
+
+      - name: Upload application jar
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: content-analytics-backend-jar
+          path: target/*.jar
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload JaCoCo coverage report
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+          if-no-files-found: warn
+          retention-days: 14

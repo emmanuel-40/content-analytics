@@ -10,7 +10,7 @@ import java.util.UUID;
 
 /**
  * A user's subscription tier and their credit allowance for the current period.
- * <p>
+ * 
  * One row per user ({@code user_id} is unique). Purchased credits that exceed the monthly
  * allowance are tracked separately in {@link #purchasedCredits}, so rolling the period over
  * never destroys money the user paid for.
@@ -94,12 +94,17 @@ public class Subscription {
      * Roll the billing period forward, resetting the monthly allowance.
      * <p>
      * {@code purchasedCredits} are intentionally preserved.
+     *
+     * @param now the current instant, passed in by the caller rather than read
+     *            from the system clock here. Injecting the time source keeps this
+     *            deterministic in tests (a fixed {@link java.time.Clock} can be supplied)
+     *            and guarantees {@code periodStart}/{@code periodEnd} come from one instant.
      */
-    public void rollPeriod(int newAllowance) {
+    public void rollPeriod(int newAllowance, LocalDateTime now) {
         this.monthlyCreditAllowance = newAllowance;
         this.creditsUsedThisPeriod = 0;
-        this.periodStart = LocalDateTime.now();
-        this.periodEnd = LocalDateTime.now().plusDays(30);
+        this.periodStart = now;
+        this.periodEnd = now.plusDays(30);
     }
 
 }

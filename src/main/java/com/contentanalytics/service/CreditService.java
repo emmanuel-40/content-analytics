@@ -61,14 +61,17 @@ public class CreditService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new IllegalArgumentException("User not found"));
 
+        // Read the clock exactly once so periodStart/periodEnd come from a single instant
+        // (periodEnd is then precisely start + 30 days, never a couple of microseconds off).
+        LocalDateTime now = LocalDateTime.now(clock);
         Subscription subscription = Subscription.builder()
                 .user(user)
                 .tier(SubscriptionTier.FREE)
                 .monthlyCreditAllowance(SubscriptionTier.FREE.getMonthlyCredits())
                 .creditsUsedThisPeriod(0)
                 .purchasedCredits(0)
-                .periodStart(LocalDateTime.now(clock))
-                .periodEnd(LocalDateTime.now(clock).plusDays(30))
+                .periodStart(now)
+                .periodEnd(now.plusDays(30))
                 .status(SubscriptionStatus.ACTIVE)
                 .autoRenew(true)
                 .build();

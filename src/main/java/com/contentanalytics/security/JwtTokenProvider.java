@@ -107,18 +107,30 @@ public class JwtTokenProvider {
             SecretKey key = Keys.hmacShaKeyFor(jwtSecret.getBytes());
             return Jwts.parserBuilder()
                     .setSigningKey(key)
+                    .setClock(jjwtClock())
                     .build()
                     .parseClaimsJws(token)
                     .getBody();
         } catch (ExpiredJwtException e) {
-            // Signature was valid; only the exp check (JVM wall clock) failed. Return the
-            // claims so expiry is judged by isTokenExpired()/the injected Clock instead.
-            log.debug("Token past its exp per the library clock; deferring expiry to the injected Clock");
+            // Signature verified and only the exp check failed - and that check now uses
+            // our Clock via setClock(jjwtClock()). We still surface the claims so callers
+            // like getTokenTimeToLive() can read an expired token's exp; the accept/reject
+            // decision is made solely by validateToken()/isTokenExpired(), never here.
+            log.debug("Token past its exp per the injected Clock; deferring verdict to validateToken()");
             return e.getClaims();
         } catch (Exception e) {
             log.error("Error extracting claims from token", e);
             return null;
         }
+    }
+
+    /**
+     * Bridge our {@link Clock} into jjwt so the parser validates expiry against the same
+     * time source used to stamp tokens - never the JVM wall clock. This is what makes
+     * token expiry deterministic under a fixed clock in tests.
+     */
+    private io.jsonwebtoken.Clock jjwtClock() {
+        return () -> Date.from(clock.instant());
     }
 
     /**
@@ -188,10 +200,14 @@ public class JwtTokenProvider {
     }
 
     /**
-     * Check if token is expired
+     * Check if token is expired.
+     * <p>
+     * RFC 7519: a token MUST be rejected once the current time is at or past {@code exp},
+     * so the comparison is {@code !exp.after(now)} (i.e. {@code now >= exp} is expired),
+     * not {@code exp.before(now)} - which would wrongly accept the exact-expiration instant.
      */
     public boolean isTokenExpired(Claims claims) {
-        return claims.getExpiration().before(new Date(clock.millis()));
+        return !claims.getExpiration().after(new Date(clock.millis()));
     }
 
     /**

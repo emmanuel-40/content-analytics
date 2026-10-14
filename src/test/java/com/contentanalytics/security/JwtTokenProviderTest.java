@@ -89,6 +89,19 @@ class JwtTokenProviderTest {
     }
 
     @Test
+    @DisplayName("a token at EXACTLY its expiry instant is rejected (now >= exp is expired, per RFC 7519)")
+    void tokenAtExactExpiryIsRejected() {
+        UUID userId = UUID.randomUUID();
+        String token = tokenProvider.generateAccessToken(userId, "oliver", "o@example.com");
+
+        // Clock pinned exactly on exp. RFC 7519 requires rejection once now >= exp, so this
+        // must be invalid. With the old exp.before(now) check this instant read as still-valid,
+        // leaving a 1 ms window an expired token could authenticate - hence the fix to !exp.after(now).
+        Clock exactlyExp = Clock.fixed(FIXED_NOW.plusMillis(ACCESS_TTL_MS), ZoneOffset.UTC);
+        assertThat(providerWith(exactlyExp, ACCESS_TTL_MS).validateToken(token)).isFalse();
+    }
+
+    @Test
     @DisplayName("refresh token embeds the CURRENT token version, not a hardcoded 1")
     void refreshTokenEmbedsSuppliedTokenVersion() {
         UUID userId = UUID.randomUUID();

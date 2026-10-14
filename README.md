@@ -215,6 +215,11 @@ src/test/java/com/contentanalytics/security/GoogleOAuthIntegrationTest.java
 
 ## Further docs
 
+> The [`docs/`](docs) folder holds the full reference set (the links below, plus
+> anything else living in there). For anything beyond this README - auth design,
+> the endpoint reference, deployment, local dev, architecture - **check the
+> `docs/` folder first**.
+
 - [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) - auth design: password +
   Google flows, cookies, frontend `/auth/callback` contract, security rules.
 - [`docs/GOOGLE_OAUTH_SETUP.md`](docs/GOOGLE_OAUTH_SETUP.md) - step-by-step

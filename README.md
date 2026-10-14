@@ -25,6 +25,7 @@ storage.
 - [API overview](#api-overview)
 - [Database and migrations](#database-and-migrations)
 - [Tests](#tests)
+- [Continuous integration](#continuous-integration)
 - [Deployment](#deployment)
 - [Repository map](#repository-map)
 - [Further docs](#further-docs)
@@ -40,7 +41,7 @@ storage.
 | Storage | S3-compatible SDK, Supabase Storage in prod, local filesystem for dev |
 | AI | Google Gemini (free tier, default), Anthropic optional, `none` to disable |
 | Email | Brevo (300/day free), verification + password-reset links |
-| Observability | Actuator (health/info/prometheus), JaCoCo (85 percent gate) |
+| Observability | Actuator (health/info/prometheus); JaCoCo coverage report (enforced gate not yet on) |
 
 ## Quickstart
 
@@ -134,7 +135,7 @@ Base path `/api`. Auth cookies are HttpOnly; CSRF token via `GET /api/auth/csrf`
 
 ## Database and migrations
 
-Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs `V1` through `V11` from
+Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs `V1` through `V13` from
 `src/main/resources/db/migration` on boot.
 
 - `V1-V10`: users, documents, health metrics, email/password tokens, profiles,
@@ -144,6 +145,10 @@ Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs `V1` through `V11` from
   `users.provider_subject` (Google `sub`), makes `users.password` nullable
   (Google-only accounts have none), unique index on
   `(provider, provider_subject)` - NULL-safe so local rows never collide.
+- **`V12__Create_Payment_Transactions_Table.sql`**: the payment ledger
+  (reference, provider, status, amount, credits) behind the Paystack flow.
+- **`V13__Drop_Decorative_Profile_Fields.sql`**: removes the unused
+  `company`/`job_title` profile columns (no feature read them).
 
 ## Tests
 
@@ -151,11 +156,28 @@ Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs `V1` through `V11` from
 ./mvnw test            # full suite (H2 in-memory, no credentials needed)
 ```
 
-Google coverage (`GoogleOAuthIntegrationTest`): provisioner find/link/create
-rules including sub-mismatch refusal, providers-flag shape, failure-handler
-reason vocabulary, password-login guard for passwordless rows. OAuth tests
-never hit the network - the Google side (consent/code/userinfo) is outside
-what we own.
+54 tests across 8 files, all deterministic (no sleeps, no network, in-memory
+H2 with `create-drop`, per-test fixture cleanup) so CI never goes red randomly.
+Time-sensitive logic uses an injected `java.time.Clock` that tests freeze, so
+period math and JWT `exp`/`iat` assertions are exact rather than wall-clock
+dependent.
+
+Coverage by area:
+
+- **Google sign-in** (`GoogleOAuthIntegrationTest`): provisioner find/link/create
+  rules including sub-mismatch refusal, providers-flag shape, failure-handler
+  reason vocabulary, password-login guard for passwordless rows. OAuth tests
+  never hit the network - the Google side (consent/code/userinfo) is outside
+  what we own.
+- **Payments** (`PaymentServiceTest`): initialize/verify/webhook - signature
+  verification, amount-mismatch rejection, idempotent duplicate credits.
+- **JWT** (`JwtTokenProviderTest`): round-trip, expiry boundary (RFC 7519
+  reject-at-expiry), wrong-signature rejection - all against a frozen clock.
+- **Credits/subscriptions** (`SubscriptionTest`): available-credit math,
+  period rollover preserving purchased credits.
+- **Storage, AI analysis, rate limiting** (`StorageServiceTest`,
+  `AiAnalysisServiceTest`, `RateLimitingConfigTest`) and the profile-picture
+  integration suite.
 
 ## Deployment
 

@@ -28,7 +28,7 @@ Postgres + Redis with dev-safe defaults.
 ./mvnw test                     # full suite, H2 in-memory, no credentials
 ```
 
-Flyway migrates `V1`-`V11` automatically; Hibernate is `validate`-only, so a
+Flyway migrates `V1`-`V13` automatically; Hibernate is `validate`-only, so a
 schema mismatch fails fast instead of silently altering tables.
 
 To see SQL while debugging, create the git-ignored
@@ -62,7 +62,8 @@ logger lines described in the `LOGGING` block of `application.properties`.
   the failure-handler vocabulary, and the password-login guard - all without
   network access. Fixture emails contain `goauth-test` so cleanup cannot touch
   other suites.
-- JaCoCo gate is 85 percent (`./mvnw verify`).
+- JaCoCo produces a coverage report via `./mvnw verify` (the `check` gate is
+  deliberately disabled until coverage rises; see `pom.xml`).
 
 ## Conventions
 

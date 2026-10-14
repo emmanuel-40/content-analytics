@@ -14,6 +14,7 @@ linking is HTTP 409 (`AccountLinkingException`).
 - [Documents](#documents)
 - [Health metrics](#health-metrics)
 - [Subscriptions and credits](#subscriptions-and-credits)
+- [Payments (Paystack, test mode)](#payments-paystack-test-mode)
 - [Ops](#ops)
 
 ## Auth
@@ -61,6 +62,34 @@ CRUD over dated metric entries plus aggregate endpoints for the dashboard charts
 
 Plan catalog, current subscription, credit balance/usage, and the audit trail
 written on every analysis job.
+
+| Method + path | Auth | Notes |
+|---|---|---|
+| `GET /api/subscription/tiers` | no | Public tier catalogue (FREE/PREMIUM/ENTERPRISE + monthly credits). |
+| `GET /api/subscription` | cookie | Current tier, balance, period window. |
+| `GET /api/subscription/transactions?page=&size=` | cookie | Credit ledger, newest first. |
+| `POST /api/subscription/purchase-credits` | **ADMIN** | Grants credits with no money - test/demo seeding only. Real buys go through payments below. |
+
+## Payments (Paystack, test mode)
+
+The money flow never trusts the browser. `/initialize` creates a `PENDING`
+ledger row and returns a hosted checkout URL; the **webhook** (HMAC over the raw
+body, then server-side re-query of Paystack) is the only path that marks a row
+`SUCCESS` and grants credits, and it is idempotent (a duplicate delivery credits
+once). `/verify` reconciles a returning browser through the same verified path.
+
+| Method + path | Auth | Notes |
+|---|---|---|
+| `POST /api/payments/initialize` | cookie | Body `{credits}` -> `{reference, checkoutUrl, amountKobo, credits, publicKey, status}`. Open `checkoutUrl` in Paystack. |
+| `GET /api/payments/verify?reference=` | cookie | Re-queries Paystack and applies credit on success (same logic as webhook). |
+| `POST /api/payments/webhook` | no (HMAC) | Paystack -> us. Verify `x-paystack-signature`; always `200 {status:received}` unless the body is unreadable. |
+| `GET /api/payments/history` | cookie | Own checkout attempts, newest first. |
+| `GET /api/payments/status` | no | `{configured, packs, currency}` - SPA hides the Buy button while unconfigured (mirrors `/api/auth/providers`). |
+
+> Test mode by default: swap in live `PAYSTACK_SECRET_KEY` / `PAYSTACK_PUBLIC_KEY`
+> on Render and flip `app.payments.mode=live` - **no code change**. Locally, test
+> with card `4084 0840 8408 4081`; the webhook needs a public URL (ngrok) or just
+> call `/verify` after paying.
 
 ## Ops
 

@@ -73,7 +73,7 @@ which is why the prod file pins `server.forward-headers-strategy=framework`
 
 ## 5. Deploy and verify
 
-1. Deploy; Flyway runs `V1`-`V11` on boot (validate mode - the schema must migrate,
+1. Deploy; Flyway runs `V1`-`V13` on boot (validate mode - the schema must migrate,
    never be created by Hibernate).
 2. `GET https://<backend>/actuator/health` -> UP (sub-checks: db, redis, storage).
 3. `GET https://<backend>/api/auth/providers` -> `{"google":true}` once the Google
@@ -83,9 +83,13 @@ which is why the prod file pins `server.forward-headers-strategy=framework`
 
 ## Rollback / notes
 
--_roll back by redeploying the previous Render release; Flyway migrations are
-  additive (`V11` only adds nullable columns + an index), so old code runs on the
-  new schema.
+- Roll back by redeploying the previous Render release. Note the migration mix:
+  `V1`-`V12` are additive (new tables, nullable columns), so old code still runs
+  on the newer schema; **`V13` drops the `company`/`job_title` columns**, so an
+  older image that still selects those columns would break against a `V13`
+  database. In practice the app no longer references them, but if you ever roll
+  code back below the `V13` release, restore the columns first (Flyway has no
+  down-migration by design).
 - Never enable `server.ssl` on Render (no keystore exists; TLS ends at the proxy).
 - Cookies flip Secure automatically on https origins; CSRF comes from `/api/auth/csrf`.
 - Free-tier sleeps: keep UptimeRobot on `/api/health` if cold starts hurt.

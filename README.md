@@ -19,6 +19,7 @@ storage.
 
 - [Stack](#stack)
 - [Quickstart](#quickstart)
+- [Docker](#docker)
 - [Configuration](#configuration)
 - [Google sign-in (OAuth2)](#google-sign-in-oauth2)
 - [API overview](#api-overview)
@@ -56,6 +57,24 @@ SPRING_PROFILES_ACTIVE=prod ./mvnw spring-boot:run
 ```
 
 The API listens on `http://localhost:8080` by default.
+
+## Docker
+
+The backend ships as a multi-stage image (Maven/JDK 21 build → slim JRE 21 runtime, runs as an
+unprivileged user, with a container healthcheck). Two Compose files, depending on your machine:
+
+| You already run Postgres/Redis/RabbitMQ locally (default dev) | Fresh machine / no services running |
+|---|---|
+| `docker compose -f docker-compose.app.yml up --build` | `docker compose up --build` |
+
+- **`docker-compose.app.yml`** (recommended for you) runs **only** the backend container and
+  reaches your host services via `host.docker.internal`, so it does **not** collide with the
+  Postgres/Redis/RabbitMQ already on your ports `5432`/`6379`/`5672`.
+- **`docker-compose.yml`** starts its **own** Postgres + Redis + RabbitMQ alongside the app - use
+  it on a clean machine. It would conflict with your running services, so don't run both at once.
+
+Either way the API is on `http://localhost:8080`. Uploaded documents/profile pictures persist in a
+named `uploads` volume across restarts. To stop: `docker compose ... down` (add `-v` to wipe data).
 
 ## Configuration
 

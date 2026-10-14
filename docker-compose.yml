@@ -1,0 +1,111 @@
+# 
+# Content Analytics Backend - full local stack
+#
+#   docker compose up --build
+#
+# Brings up everything the backend needs on your machine with one command:
+#   app        -> Spring Boot API on http://localhost:8080
+#   postgres   -> database on localhost:5432
+#   redis      -> cache / rate-limit store on localhost:6379
+#   rabbitmq   -> durable job broker on localhost:5672 (UI on localhost:15672)
+#
+# application.properties hardcodes "localhost" for these hosts, which is right
+# when you run the app directly but wrong inside containers (the app would try
+# to reach itself, not the sibling containers). So here we override just the
+# host names with the Compose service names via environment variables - Spring
+# Boot's relaxed binding maps e.g. SPRING_DATASOURCE_URL onto
+# spring.datasource.url. Everything else still comes from application.properties.
+# 
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ca-postgres
+    environment:
+      POSTGRES_DB: content_analytics_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d content_analytics_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: ca-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: ca-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # management UI -> http://localhost:15672 (guest/guest)
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ca-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # RabbitMQ is optional: the queue falls back to in-process @Async when the
+      # broker is unreachable, so we don't block app startup on it.
+      rabbitmq:
+        condition: service_started
+    environment:
+      # --- Database (service name "postgres", not localhost) ---
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/content_analytics_db
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      # --- Redis (service name "redis") ---
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      # --- RabbitMQ (service name "rabbitmq") ---
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      SPRING_RABBITMQ_VIRTUAL_HOST: /
+      # Cap the JVM to fit a modest container.
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75"
+    ports:
+      - "8080:8080"
+    volumes:
+      # Uploaded documents + profile pictures persist across restarts.
+      - uploads:/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  rabbitdata:
+  uploads:

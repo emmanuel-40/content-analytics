@@ -1,0 +1,26 @@
+# Keep the build context small and the image clean / secret-free.
+# Nothing in here is needed inside the container.
+
+# Build output (rebuilt inside the image)
+target/
+
+# Version control & IDE
+.git
+.gitignore
+.idea/
+.vscode/
+*.iml
+
+# Secrets / local env (never bake these into an image)
+.env
+*.env
+.env.*
+
+# Logs & local scratch
+*.log
+tmp/
+
+# Docs & tests are not needed at runtime (CI runs tests instead)
+docs/
+*.md
+src/test/

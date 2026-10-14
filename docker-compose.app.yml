@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# App-only stack: for when you ALREADY run Postgres / Redis / RabbitMQ on your
+# own machine (the default dev setup - application.properties points at
+# localhost). This runs ONLY the backend container and reaches those host
+# services through host.docker.internal, so it does NOT collide with yours on
+# ports 5432 / 6379 / 5672 the way docker-compose.yml (which starts its own
+# copies) would.
+#
+#   docker compose -f docker-compose.app.yml up --build
+#
+# The API is then on http://localhost:8080 - same as `./mvnw spring-boot:run`.
+# Use the full docker-compose.yml instead on a fresh machine that has none of
+# the backing services running.
+# ---------------------------------------------------------------------------
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ca-app
+    environment:
+      # Reach the services running on the HOST, not inside a container.
+      # host.docker.internal -> host-gateway works on Windows, macOS and Linux.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://host.docker.internal:5432/content_analytics_db
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      SPRING_DATA_REDIS_HOST: host.docker.internal
+      SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_RABBITMQ_HOST: host.docker.internal
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75"
+    ports:
+      - "8080:8080"
+    # Maps the well-known host.docker.internal name to the host on every OS
+    # (it's built-in on Windows/macOS; host-gateway provides it on Linux).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Uploaded documents + profile pictures persist across restarts.
+      - uploads:/data
+    restart: unless-stopped
+
+volumes:
+  uploads:

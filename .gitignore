@@ -46,3 +46,13 @@ Thumbs.db
 # Test output
 test-out.txt
 hs_err_pid*.log
+
+# Docker / CI build scratch (never commit)
+docker-build.err
+docker-build.log
+verify-ci.log
+verify-clock.log
+.smoke/
+.docker-runtime/
+runtime/
+app.jar

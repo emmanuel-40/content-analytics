@@ -10,7 +10,7 @@ system (see `docs/AUTHENTICATION.md`).
 
 - [Modules](#modules)
 - [Request lifecycle](#request-lifecycle)
-- [Data model (V11)](#data-model-v11)
+- [Data model](#data-model)
 - [Cross-cutting](#cross-cutting)
 
 ## Modules
@@ -38,7 +38,7 @@ Browser -> CORS filter -> CsrfCookieFilter -> JwtAuthenticationFilter
 Analysis uploads additionally emit STOMP progress on `/ws` while the job runs
 async (or via RabbitMQ when `app.queue.type=rabbitmq`).
 
-## Data model (V11)
+## Data model
 
 `users` gained `provider` (`LOCAL` default backfill) + nullable `provider_subject`
 (Google `sub`) + nullable `password` (NULL = Google-only, added via forgot-password
@@ -46,16 +46,20 @@ later). Unique index `(provider, provider_subject)` is NULL-safe, so the many
 unlinked `LOCAL` rows never collide while each Google identity maps to one row.
 Migrations `V1`-`V10` own the remaining tables (documents, health metrics,
 verification/reset tokens, profiles, avatars, password history,
-subscriptions/credits/audit) plus performance indexes.
+subscriptions/credits/audit) plus performance indexes. `V12` adds the
+payment-transaction ledger (PENDING-first, idempotent via provider reference) and
+`V13` drops two decorative profile columns.
 
 ## Cross-cutting
 
 - **Config**: `application.properties` (local, plain values) <- overridden by
   `application-prod.properties` (Render env-var mapping) <- `application-test.properties`
   (self-contained H2, never reads the other two).
-- **Migrations**: Flyway `V1`-`V11`, `validate` mode everywhere - schema changes
+- **Migrations**: Flyway `V1`-`V13`, `validate` mode everywhere - schema changes
   ship as versioned SQL, never Hibernate DDL.
 - **Observability**: Actuator health/info/prometheus; `HealthCheckService` aggregates
   db/redis/storage probes for Render.
-- **Tests**: `@SpringBootTest` + MockMvc on H2; OAuth suite asserts our rules
-  without network; JaCoCo 85 percent gate.
+- **Tests**: `@SpringBootTest` + MockMvc on H2 (deterministic - in-memory DB,
+  injected `Clock`, no network/sleeps); the OAuth suite asserts our rules without
+  network. JaCoCo produces a coverage report; the `check` gate is intentionally
+  disabled until coverage rises (see `pom.xml`).

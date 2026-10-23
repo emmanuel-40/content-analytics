@@ -55,4 +55,5 @@ verify-clock.log
 .smoke/
 .docker-runtime/
 runtime/
-app.jar
+# Local secrets - never commit (applies to application-local.properties etc.)
+application-local.properties

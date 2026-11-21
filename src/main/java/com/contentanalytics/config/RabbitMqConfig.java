@@ -11,10 +11,10 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * RabbitMQ topology for document processing.
- * <p>
+ * 
  * Only created when {@code app.queue.type=rabbitmq}, so no connection is attempted in the
  * default in-process mode.
- * <p>
+ * 
  * Declarative queues are used so the topology is reproducible across environments.
  */
 @Configuration

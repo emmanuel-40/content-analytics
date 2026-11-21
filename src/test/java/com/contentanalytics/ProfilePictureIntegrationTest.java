@@ -34,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Integration tests that boot the real Spring context against in-memory H2.
  *
- * <p>These exist because the bugs they cover are invisible to unit tests: both were
+ * These exist because the bugs they cover are invisible to unit tests: both were
  * constraint violations that only a real database could raise.
  *
  * <ul>
@@ -44,7 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       instead of updating the first, so re-uploading an avatar returned a 500.</li>
  * </ul>
  *
- * <p>The {@code test} profile pins the datasource to H2 in
+ * The {@code test} profile pins the datasource to H2 in
  * {@code src/test/resources/application-test.properties}; {@link #testsRunAgainstH2()}
  * is a tripwire that fails loudly if that is ever bypassed.
  */
@@ -203,3 +203,4 @@ class ProfilePictureIntegrationTest {
         return new MockMultipartFile("file", filename, "image/png", bytes.toByteArray());
     }
 }
+

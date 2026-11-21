@@ -10,7 +10,7 @@ import java.util.UUID;
 
 /**
  * Consumes document-processing jobs published by {@link RabbitMqJobQueue}.
- * <p>
+ * 
  * Only registered when {@code app.queue.type=rabbitmq}, so the application starts normally
  * without a broker.
  */

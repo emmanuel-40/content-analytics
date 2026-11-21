@@ -47,15 +47,17 @@ unlinked `LOCAL` rows never collide while each Google identity maps to one row.
 Migrations `V1`-`V10` own the remaining tables (documents, health metrics,
 verification/reset tokens, profiles, avatars, password history,
 subscriptions/credits/audit) plus performance indexes. `V12` adds the
-payment-transaction ledger (PENDING-first, idempotent via provider reference) and
-`V13` drops two decorative profile columns.
+payment-transaction ledger (PENDING-first, idempotent via provider reference),
+`V13` drops two decorative profile columns, `V14` adds CHECK constraints, and
+`V15` adds JPA `@Version` columns plus unique ledger indexes for purchase and
+AI-analysis references.
 
 ## Cross-cutting
 
 - **Config**: `application.properties` (local, plain values) <- overridden by
   `application-prod.properties` (Render env-var mapping) <- `application-test.properties`
   (self-contained H2, never reads the other two).
-- **Migrations**: Flyway `V1`-`V13`, `validate` mode everywhere - schema changes
+- **Migrations**: Flyway `V1`-`V15`, `validate` mode everywhere - schema changes
   ship as versioned SQL, never Hibernate DDL.
 - **Observability**: Actuator health/info/prometheus; `HealthCheckService` aggregates
   db/redis/storage probes for Render.

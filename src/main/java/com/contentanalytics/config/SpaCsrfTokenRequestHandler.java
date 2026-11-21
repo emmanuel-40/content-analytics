@@ -10,15 +10,15 @@ import java.util.function.Supplier;
 
 /**
  * CSRF handler for a cookie-authenticated single-page application.
- * <p>
+ * 
  * Delegates entirely to {@link XorCsrfTokenRequestAttributeHandler}, which is what makes the
  * BREACH mitigation work: the token is XOR-masked with fresh random bytes before it is handed
  * to the client, so it cannot be recovered from a compression side-channel.
- * <p>
+ * 
  * Because the value the client must send back is the <em>masked</em> token - not the raw value
  * stored in the cookie - the SPA must fetch it from {@code GET /api/auth/csrf} and echo that
  * in the {@code X-XSRF-TOKEN} header. Reading {@code document.cookie} alone is not sufficient.
- * <p>
+ * 
  * This class exists to make that requirement explicit at the configuration site rather than
  * leaving a bare XOR handler for someone to "fix" later by reverting to the plain handler,
  * which silently removes the BREACH protection.

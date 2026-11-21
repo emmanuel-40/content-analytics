@@ -7,6 +7,7 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.context.annotation.EnableAspectJAutoProxy;
 
 @SpringBootApplication
 @EnableAsync
@@ -14,6 +15,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableJpaAuditing
 @EnableScheduling
 @EnableMethodSecurity  // Enables @PreAuthorize on controller/service methods
+@EnableAspectJAutoProxy // Enables @Aspect classes (IdempotencyAspect, RateLimitingAspect)
 public class ContentAnalyticsApplication {
 
 	public static void main(String[] args) {

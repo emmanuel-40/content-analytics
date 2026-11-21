@@ -34,7 +34,7 @@ public class JwtTokenProvider {
 
     /**
      * Single source of "now" for stamping and checking token times.
-     * <p>
+     * 
      * Injected rather than calling {@code new Date()} / {@code System.currentTimeMillis()}
      * directly so tests can pin it to a fixed instant: issued-at and expiry become exact,
      * assertable values, and "is this token expired?" can be stepped across its boundary
@@ -92,7 +92,7 @@ public class JwtTokenProvider {
 
     /**
      * Extract claims from token.
-     * <p>
+     * 
      * Signature is always verified. Expiry, however, is <em>not</em> enforced here: a
      * validly-signed token whose {@code exp} is in the past still returns its claims, and
      * the accept/reject decision is made by {@link #isTokenExpired(Claims)} against the
@@ -201,7 +201,7 @@ public class JwtTokenProvider {
 
     /**
      * Check if token is expired.
-     * <p>
+     * 
      * RFC 7519: a token MUST be rejected once the current time is at or past {@code exp},
      * so the comparison is {@code !exp.after(now)} (i.e. {@code now >= exp} is expired),
      * not {@code exp.before(now)} - which would wrongly accept the exact-expiration instant.
@@ -236,3 +236,4 @@ public class JwtTokenProvider {
     }
 
 }
+

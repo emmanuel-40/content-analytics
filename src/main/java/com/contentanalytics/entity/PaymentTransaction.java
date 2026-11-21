@@ -10,7 +10,7 @@ import java.util.UUID;
 
 /**
  * One checkout attempt against a payment provider.
- * <p>
+ * 
  * Created PENDING by {@code POST /api/payments/initialize} before any money
  * moves. Flipped to SUCCESS only by the webhook after HMAC verification and a
  * server-side re-query of the transaction - that flip is the single place
@@ -32,6 +32,10 @@ public class PaymentTransaction {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
+
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version = 0L;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
@@ -80,3 +84,4 @@ public class PaymentTransaction {
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
 }
+

@@ -12,11 +12,11 @@ import java.util.UUID;
 
 /**
  * RabbitMQ-backed {@link JobQueue}.
- * <p>
+ * 
  * Enabled with {@code app.queue.type=rabbitmq}. The broker (for example a CloudAMQP free-tier
  * instance) provides durability: if the application restarts mid-analysis the job stays
  * queued instead of being lost.
- * <p>
+ * 
  * If the broker cannot be reached the job is executed in-process instead, so an outage of the
  * message broker degrades performance rather than functionality.
  */

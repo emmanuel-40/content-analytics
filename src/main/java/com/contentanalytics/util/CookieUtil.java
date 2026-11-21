@@ -18,11 +18,11 @@ public class CookieUtil {
 
     /**
      * Set the access token in an HTTP-only cookie.
-     * <p>
+     * 
      * Storing the access token in a cookie (rather than returning it in the response body for
      * the frontend to keep in {@code localStorage}) means a successful XSS attack cannot read
      * it, which is the primary advantage of cookie-based JWT auth.
-     * <p>
+     * 
      * The cookie is scoped to the API root and marked {@code SameSite=Lax} so it accompanies
      * same-site navigations while remaining cross-site protected.
      */
@@ -118,3 +118,4 @@ public class CookieUtil {
     }
 
 }
+

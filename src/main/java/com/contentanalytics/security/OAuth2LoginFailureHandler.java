@@ -15,7 +15,7 @@ import java.io.IOException;
 
 /**
  * Sends a failed Google handshake back to the SPA with a machine-readable reason.
- * <p>
+ * 
  * The reason is drawn from a fixed vocabulary rather than copying the exception
  * message, so nothing a remote party controls can ever be reflected into the
  * redirect URL (no open redirect, no HTML/JS injection into the landing page).
@@ -85,3 +85,4 @@ public class OAuth2LoginFailureHandler implements AuthenticationFailureHandler {
         };
     }
 }
+

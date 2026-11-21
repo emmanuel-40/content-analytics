@@ -7,7 +7,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 
 /**
  * Password hashing, kept in its own configuration on purpose.
- * <p>
+ * 
  * The {@code PasswordEncoder} bean is needed by {@code AuthService} (register,
  * login, password reset), which is in turn needed by the OAuth2 login success
  * handler, which is in turn needed by {@code SecurityConfig}. If this bean
@@ -27,3 +27,4 @@ public class PasswordConfig {
         return new BCryptPasswordEncoder(12);
     }
 }
+

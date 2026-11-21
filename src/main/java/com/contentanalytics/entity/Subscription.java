@@ -33,6 +33,10 @@ public class Subscription {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version = 0L;
+
     @OneToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
@@ -92,7 +96,7 @@ public class Subscription {
 
     /**
      * Roll the billing period forward, resetting the monthly allowance.
-     * <p>
+     * 
      * {@code purchasedCredits} are intentionally preserved.
      *
      * @param now the current instant, passed in by the caller rather than read

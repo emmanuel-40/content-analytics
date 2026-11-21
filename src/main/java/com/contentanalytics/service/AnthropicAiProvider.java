@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
 
 /**
  * Anthropic Claude implementation of {@link AiProvider}.
- * <p>
+ * 
  * Kept as an alternative backend. Claude has no free tier, so it is only selected when
  * {@code app.ai.provider=anthropic} and an API key is supplied.
  */

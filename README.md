@@ -1,232 +1,406 @@
-# Content Analytics - Backend
+# Content Analytics — Backend
 
-Spring Boot 4 / Java 21 REST API behind the Content Analytics SPA:
-JWT-cookie auth (password + **Google sign-in**), document upload and AI
-analysis, health metrics, subscriptions/credits, email (Brevo), WebSocket
-progress - backed by PostgreSQL (Supabase-friendly), Redis and S3-compatible
-storage.
+## What this project is
 
-> **Frontend:** the SPA lives in a separate repository.
+**Content Analytics** is a freemium SaaS for people who work with documents —
+writers, researchers, and small teams who need more than a file store. Users
+upload PDFs and Office docs, get structured AI analysis (summary, key topics,
+sentiment), and track usage against a monthly credit allowance they can top up.
+
+This repository is the **backend API** that owns identity, billing, storage,
+analysis jobs, and the credit ledger. The SPA is a separate frontend that talks
+to this API over HTTPS (cookies + CSRF) and receives live job progress over
+WebSocket.
+
+In short: authenticate → upload → analyse (async, credit-gated) → pay for more
+credits when the free tier runs out — with money moving only through a verified
+Paystack webhook, never from a browser callback alone.
+
+> **Frontend:** separate repository.
 > <!-- FRONTEND-REPO-PLACEHOLDER: replace the URL below with the real repo when created. -->
-> **Frontend repo:** `https://github.com/<org-or-user>/<frontend-repo>` _(placeholder - update when the repo exists)_
+> **Frontend repo:** `https://github.com/<org-or-user>/<frontend-repo>` _(placeholder — update when the repo exists)_
 >
-> The only backend-to-frontend contracts are:
-> `NEXT_PUBLIC_API_URL` maps to this API origin, the `/api/auth/providers`
-> response, and the `/auth/callback?status=...&reason=...` redirect documented in
-> [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md).
+> Backend ↔ frontend contracts:
+> - `NEXT_PUBLIC_API_URL` → this API origin
+> - `GET /api/auth/providers`
+> - `/auth/callback?status=...&reason=...` redirect (see [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md))
 
 ## Table of contents
 
-- [Stack](#stack)
-- [Quickstart](#quickstart)
-- [Docker](#docker)
-- [Configuration](#configuration)
-- [Google sign-in (OAuth2)](#google-sign-in-oauth2)
-- [API overview](#api-overview)
-- [Database and migrations](#database-and-migrations)
-- [Tests](#tests)
-- [Continuous integration](#continuous-integration)
-- [Deployment](#deployment)
-- [Repository map](#repository-map)
-- [Further docs](#further-docs)
+1. [What this project is](#what-this-project-is)
+2. [Architecture](#architecture)
+3. [Stack](#stack)
+4. [Quickstart](#quickstart)
+5. [Docker](#docker)
+6. [Configuration](#configuration)
+7. [Authentication](#authentication)
+8. [Payments and credits](#payments-and-credits)
+9. [Concurrency and idempotency](#concurrency-and-idempotency)
+10. [API overview](#api-overview)
+11. [Database and migrations](#database-and-migrations)
+12. [Tests](#tests)
+13. [Continuous integration](#continuous-integration)
+14. [Deployment](#deployment)
+15. [Repository map](#repository-map)
+16. [Further docs](#further-docs)
+
+---
+
+## Architecture
+
+Monolith layout: **controllers → services → JPA repositories → PostgreSQL**.
+Redis backs cache, login lockout, idempotency keys, and distributed locks.
+Document analysis runs async (`@Async` or RabbitMQ). Auth is one JWT cookie
+path for every caller; Google OAuth only provisions into the same `users`
+table.
+
+```mermaid
+flowchart TB
+  subgraph Clients
+    SPA[SPA / Browser]
+    Paystack[Paystack webhooks]
+  end
+
+  subgraph API["Spring Boot API :8080"]
+    Sec[Security + JWT filter + OAuth2]
+    Ctrl[Controllers]
+    Svc[Services]
+    WS[STOMP /ws]
+  end
+
+  subgraph Data
+    PG[(PostgreSQL)]
+    Redis[(Redis)]
+    S3[(S3 / local uploads)]
+  end
+
+  subgraph External
+    Gemini[Gemini / Anthropic]
+    Brevo[Brevo email]
+    PS[Paystack API]
+  end
+
+  SPA --> Sec --> Ctrl --> Svc
+  Paystack --> Ctrl
+  Svc --> PG
+  Svc --> Redis
+  Svc --> S3
+  Svc --> Gemini
+  Svc --> Brevo
+  Svc --> PS
+  Svc --> WS
+  WS --> SPA
+```
+
+### Request lifecycle
+
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant C as CORS / CSRF
+  participant J as JwtAuthenticationFilter
+  participant Ctrl as Controller
+  participant Svc as Service
+  participant DB as PostgreSQL
+
+  B->>C: HTTP /api/...
+  C->>J: filters
+  Note over J: /oauth2/** and /login/oauth2/** are permitAll
+  J->>Ctrl: SecurityContext set (if cookie valid)
+  Ctrl->>Svc: @Transactional at service boundary
+  Svc->>DB: JPA / Hikari
+  Svc-->>B: JSON / cookies / redirect
+```
+
+### Document analysis pipeline
+
+```mermaid
+flowchart LR
+  Upload[POST upload] --> Persist[Save Document UPLOADED]
+  Persist --> Queue{JobQueue}
+  Queue -->|async| AsyncQ[AsyncJobQueue]
+  Queue -->|rabbitmq| RMQ[RabbitMqJobQueue]
+  AsyncQ --> Proc[DocumentProcessingService]
+  RMQ --> Proc
+  Proc --> Extract[Extract text]
+  Extract --> Basic[Word / char counts]
+  Basic --> Credits{hasCredits?}
+  Credits -->|yes| Consume[consumeCredits FOR UPDATE]
+  Consume --> AI[Gemini / Anthropic]
+  Credits -->|no| Done[COMPLETED basic only]
+  AI --> Done
+  Proc --> WS[WebSocket progress]
+```
+
+More module detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
 
 ## Stack
 
 | Layer | Choice |
 |---|---|
 | Runtime | Java 21, Spring Boot 4.0.6 (Maven `mvnw`) |
-| Auth | Spring Security + JWT in HttpOnly cookies; `spring-boot-starter-oauth2-client` for Google (authorization-code flow only) |
-| Data | Spring Data JPA + Flyway, PostgreSQL (local dev, Supabase in prod) |
-| Cache / realtime | Redis (cache), STOMP WebSocket (`/ws`) |
-| Storage | S3-compatible SDK, Supabase Storage in prod, local filesystem for dev |
-| AI | Google Gemini (free tier, default), Anthropic optional, `none` to disable |
-| Email | Brevo (300/day free), verification + password-reset links |
-| Observability | Actuator (health/info/prometheus); JaCoCo coverage report (enforced gate not yet on) |
+| Auth | Spring Security + JWT in HttpOnly cookies; `spring-boot-starter-oauth2-client` for Google (authorization-code only) |
+| Data | Spring Data JPA + Flyway, PostgreSQL (local / Supabase prod) |
+| Cache / realtime | Redis, STOMP WebSocket (`/ws`) |
+| Storage | S3-compatible SDK (Supabase Storage prod), local filesystem for dev |
+| AI | Google Gemini (default), Anthropic optional, `none` to disable |
+| Payments | Paystack (test → live via key swap) |
+| Email | Brevo (verification + password-reset) |
+| Observability | Actuator (health / info / prometheus); JaCoCo report (check gate not enforced yet) |
+
+---
 
 ## Quickstart
 
-Prerequisites: JDK 21, Maven (wrapper included), PostgreSQL 15+ and Redis running locally.
+Prerequisites: JDK 21, Maven wrapper, PostgreSQL 15+, Redis.
 
 ```bash
-# Local dev needs no setup step: values are already in
-# src/main/resources/application.properties. Edit that file directly
-# if your Postgres/Redis differ, then:
+# Local values live in src/main/resources/application.properties
 ./mvnw spring-boot:run
 
-# Prod profile (Render: Supabase + Upstash, env vars from the dashboard)
+# Prod profile (Render: Supabase + Upstash)
 SPRING_PROFILES_ACTIVE=prod ./mvnw spring-boot:run
 ```
 
-The API listens on `http://localhost:8080` by default.
+API: `http://localhost:8080`.
+
+---
 
 ## Docker
 
-The backend ships as a multi-stage image (Maven/JDK 21 build → slim JRE 21 runtime, runs as an
-unprivileged user, with a container healthcheck). Two Compose files, depending on your machine:
+Multi-stage image (Maven/JDK 21 build → slim JRE 21, unprivileged user, healthcheck).
 
-| You already run Postgres/Redis/RabbitMQ locally (default dev) | Fresh machine / no services running |
+| Already run Postgres/Redis/RabbitMQ locally | Fresh machine |
 |---|---|
 | `docker compose -f docker-compose.app.yml up --build` | `docker compose up --build` |
 
-- **`docker-compose.app.yml`** (recommended for you) runs **only** the backend container and
-  reaches your host services via `host.docker.internal`, so it does **not** collide with the
-  Postgres/Redis/RabbitMQ already on your ports `5432`/`6379`/`5672`.
-- **`docker-compose.yml`** starts its **own** Postgres + Redis + RabbitMQ alongside the app - use
-  it on a clean machine. It would conflict with your running services, so don't run both at once.
+- **`docker-compose.app.yml`** — app only; reaches host services via `host.docker.internal`.
+- **`docker-compose.yml`** — app + Postgres + Redis + RabbitMQ (avoid if host ports are taken).
 
-Either way the API is on `http://localhost:8080`. Uploaded documents/profile pictures persist in a
-named `uploads` volume across restarts. To stop: `docker compose ... down` (add `-v` to wipe data).
+API on `http://localhost:8080`. Uploads persist in a named `uploads` volume.
+
+---
 
 ## Configuration
 
-Local values live **directly in `src/main/resources/application.properties`** - no `.env`, no flags,
-just edit the file. Production values live in `src/main/resources/application-prod.properties`,
-which reads every secret from an environment variable set in the **Render dashboard**
-(Service -> Environment). Nothing secret is hardcoded in the prod file.
-
-| Where | What |
+| File | Role |
 |---|---|
-| `application.properties` | Local Postgres (`localhost:5432/content_analytics_db`), local Redis, dev JWT secret, `http://localhost:5173` frontend/CORS, Google placeholder (disabled until you paste credentials), empty Gemini/Brevo keys (features degrade gracefully) |
-| `application-prod.properties` | Same keys mapped to Render env vars: `DATABASE_URL` (Supabase pooler, keep `?prepareThreshold=0`), `DB_USERNAME`, `DB_PASSWORD`, `REDIS_HOST/PORT/PASSWORD` (Upstash), `JWT_SECRET` (64+ bytes, `openssl rand -base64 64`), `FRONTEND_URL` + CORS/websocket origins (public SPA URL), `GOOGLE_CLIENT_ID/SECRET` (optional), Supabase S3 keys + endpoint, `GEMINI_API_KEY`, `BREVO_API_KEY`, `EMAIL_FROM_ADDRESS` |
-| `application-test.properties` | Self-contained H2 suite, never touched by either of the above |
+| `application.properties` | Local Postgres/Redis, dev JWT, CORS/`FRONTEND_URL`, optional Google/Gemini/Brevo/Paystack |
+| `application-prod.properties` | Secrets from Render env vars only |
+| `application-test.properties` | In-memory H2, `create-drop`, no external deps |
 
-## Google sign-in (OAuth2)
+Never hardcode production secrets. Local keys stay out of git when real.
 
-Passwordless sign-in via the Google authorization-code flow. Fully optional and free,
-setup takes about 5 minutes in Google Cloud Console.
+---
 
-- **Start:** `GET /oauth2/authorization/google` sends the browser to Google.
-  (Spring Security builds the URL; `state` + `nonce` are validated automatically.)
-- **Success:** `302 <FRONTEND_URL>/auth/callback?status=success` with the same
-  access + refresh HttpOnly cookies `POST /api/auth/login` sets.
-- **Failure:** `302 <FRONTEND_URL>/auth/callback?status=error&reason=<code>`
-  where `<code>` is one of `access_denied | link_conflict | email_unverified |
-  state_mismatch | client_not_configured | error` (fixed vocabulary, nothing
-  attacker-controlled is reflected into the URL).
-- **Capability flag:** `GET /api/auth/providers` returns `{"google": true|false}`.
-  The SPA calls this pre-login to decide whether to render the button.
+## Authentication
 
-Account rules: unverified Google emails are rejected; first sign-in links a
-matching local account by verified email or creates a passwordless row; a row
-already linked to a *different* Google `sub` is never re-pointed (409 conflict).
+Password + optional Google authorization-code flow. One JWT cookie pair for all sessions.
 
-To enable locally, paste your Google Cloud Console credentials into
-`application.properties` (OAuth client ID, type Web application) and register:
-`http://localhost:8080/login/oauth2/code/google`. On Render, set `GOOGLE_CLIENT_ID` /
-`GOOGLE_CLIENT_SECRET` in the dashboard and register:
-`https://<backend-host>/login/oauth2/code/google`.
+```mermaid
+flowchart TD
+  Start[Sign-in] --> Local{Password?}
+  Local -->|yes| Login[POST /api/auth/login]
+  Local -->|Google| OAuth[GET /oauth2/authorization/google]
+  OAuth --> Google[Google consent]
+  Google --> Callback[GET /login/oauth2/code/google]
+  Callback --> Prov[OAuthAccountProvisioner]
+  Prov --> Find[Find by Google sub]
+  Prov --> Link[Link verified email to LOCAL]
+  Prov --> Create[Create passwordless GOOGLE user]
+  Login --> Tokens[AuthService.issueTokens]
+  Find --> Tokens
+  Link --> Tokens
+  Create --> Tokens
+  Tokens --> Cookies[HttpOnly access + refresh cookies]
+  Cookies --> SPA[/auth/callback?status=success]
+```
 
-Full checklist: **[`docs/GOOGLE_OAUTH_SETUP.md`](docs/GOOGLE_OAUTH_SETUP.md)**.
-Auth design + frontend contract: **[`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md)**.
+- **Start:** `GET /oauth2/authorization/google`
+- **Success:** `302 <FRONTEND_URL>/auth/callback?status=success`
+- **Failure:** `302 ...?status=error&reason=<code>`  
+  (`access_denied | link_conflict | email_unverified | state_mismatch | client_not_configured | error`)
+- **Capability:** `GET /api/auth/providers` → `{"google": true|false}`
+
+Account rules: unverified Google emails rejected; first sign-in links by verified email or creates passwordless row; a row already linked to a *different* Google `sub` is never re-pointed (409).
+
+Setup: [`docs/GOOGLE_OAUTH_SETUP.md`](docs/GOOGLE_OAUTH_SETUP.md).  
+Design: [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md).
+
+---
+
+## Payments and credits
+
+Invariant: **credits move only when a PENDING `payment_transactions` row flips to SUCCESS** after HMAC verification and a server-side Paystack re-query. Browser callbacks never mint credits alone.
+
+```mermaid
+sequenceDiagram
+  participant U as User / SPA
+  participant API as PaymentService
+  participant DB as payment_transactions
+  participant PS as Paystack
+  participant CR as CreditService
+
+  U->>API: POST /api/payments/initialize
+  API->>DB: INSERT PENDING (reference = ca-uuid)
+  API->>PS: initialize checkout
+  API-->>U: checkoutUrl
+
+  Note over PS,API: User pays on Paystack
+
+  PS->>API: POST /api/payments/webhook (HMAC)
+  API->>PS: GET /transaction/verify/{reference}
+  alt paid + amount matches + still PENDING
+    API->>CR: purchaseCredits(user, credits, reference)
+    API->>DB: status = SUCCESS
+  else already SUCCESS
+    API-->>PS: ack, no second credit
+  else unpaid / mismatch
+    API->>DB: status = FAILED
+  end
+
+  U->>API: GET /api/payments/verify?reference=...
+  Note over API: Same applyVerifiedPayment path
+```
+
+Credit packs (kobo): 10 → 100_000, 50 → 400_000, 120 → 800_000.
+
+Admin-only `POST /api/subscription/purchase-credits` seeds balances for demos/tests — not the real money path.
+
+---
+
+## Concurrency and idempotency
+
+How money and credits stay consistent under load:
+
+| Concern | Mechanism |
+|---|---|
+| Concurrent credit spend | `SubscriptionRepository.findByUserIdForUpdate` → `SELECT … FOR UPDATE` |
+| Concurrent free-tier create | Unique `subscriptions.user_id` + catch `DataIntegrityViolationException` and re-read |
+| Period rollover vs spend | Rollover under the same pessimistic lock in `consumeCredits` / `getOrCreateSubscription` |
+| Payment double-delivery | Status guard (SUCCESS → no-op) + unique `payment_transactions.reference` |
+| Checkout client retries | `@Idempotent` + Redis (`Idempotency-Key`) on initialize |
+| Webhook retries | `@WebhookIdempotent` + Redis event dedup |
+| Login abuse | Redis lockout (`LoginAttemptService`) + Bucket4j on login/register |
+| Token invalidation | `users.token_version` embedded in refresh JWT |
+| Optimistic conflicts | JPA `@Version` on subscription / payment / credit / user rows |
+
+```mermaid
+flowchart TD
+  A[consumeCredits] --> L[findByUserIdForUpdate]
+  L --> R{period expired?}
+  R -->|yes| Roll[rollPeriod — purchased credits kept]
+  R -->|no| Bal[Check availableCredits]
+  Roll --> Bal
+  Bal -->|insufficient| Err[InsufficientCreditsException]
+  Bal -->|ok| Debit[Debit purchased first, then monthly]
+  Debit --> Ledger[Append credit_transactions row]
+```
+
+---
 
 ## API overview
 
-Base path `/api`. Auth cookies are HttpOnly; CSRF token via `GET /api/auth/csrf`.
+Base path `/api`. Auth cookies are HttpOnly; CSRF via `GET /api/auth/csrf`.
 
 | Area | Endpoints |
 |---|---|
-| Auth | `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/refresh`, `POST /api/auth/logout`, `GET /api/auth/verify-email`, `POST /api/auth/forgot-password`, `POST /api/auth/reset-password`, `GET /api/auth/verify-token/**`, `GET /api/auth/csrf`, **`GET /api/auth/providers`** (OAuth flag) |
-| OAuth handshake | `GET /oauth2/authorization/google`, `GET /login/oauth2/code/google` (browser-driven, no JSON) |
-| Profile | `GET/PUT /api/profile`, password change, avatar upload/signed URLs |
-| Documents | upload/list/download/delete, analysis results |
+| Auth | register, login, refresh, logout, verify-email, forgot/reset-password, csrf, **providers** |
+| OAuth | `GET /oauth2/authorization/google`, `GET /login/oauth2/code/google` |
+| Profile | GET/PUT profile, password change, avatar |
+| Documents | upload / list / download / delete / analysis |
 | Health metrics | CRUD + aggregates |
-| Subscriptions/credits | plans, usage, audit |
+| Subscriptions | tier, ledger, admin purchase-credits |
+| Payments | initialize, webhook, verify, history, status |
 | Ops | `/actuator/health`, `/actuator/info`, `/actuator/prometheus` |
+
+Full tables: [`docs/API.md`](docs/API.md).
+
+---
 
 ## Database and migrations
 
-Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs `V1` through `V13` from
+Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs versioned SQL from
 `src/main/resources/db/migration` on boot.
 
-- `V1-V10`: users, documents, health metrics, email/password tokens, profiles,
-  avatars, password history, subscriptions/credits/audit, performance indexes.
-- **`V11__Add_Google_OAuth_Support.sql`**: adds `users.provider`
-  (`LOCAL`/`GOOGLE`, backfills existing rows to `LOCAL`), nullable
-  `users.provider_subject` (Google `sub`), makes `users.password` nullable
-  (Google-only accounts have none), unique index on
-  `(provider, provider_subject)` - NULL-safe so local rows never collide.
-- **`V12__Create_Payment_Transactions_Table.sql`**: the payment ledger
-  (reference, provider, status, amount, credits) behind the Paystack flow.
-- **`V13__Drop_Decorative_Profile_Fields.sql`**: removes the unused
-  `company`/`job_title` profile columns (no feature read them).
+| Version | Purpose |
+|---|---|
+| V1–V10 | users, documents, health metrics, email/password tokens, profiles, avatars, password history, subscriptions/credits/audit, indexes |
+| V11 | Google OAuth: `provider`, `provider_subject`, nullable `password`, unique `(provider, provider_subject)` |
+| V12 | `payment_transactions` ledger (PENDING-first, unique `reference`) |
+| V13 | Drop unused profile `company` / `job_title` |
+| V14 | DB CHECK constraints (positive amounts, non-negative credits, period bounds) |
+| V15 | JPA `@Version` columns + unique purchase / AI-analysis `reference_id` indexes |
+
+---
 
 ## Tests
 
 ```bash
-./mvnw test            # full suite (H2 in-memory, no credentials needed)
+./mvnw test
 ```
 
-54 tests across 8 files, all deterministic (no sleeps, no network, in-memory
-H2 with `create-drop`, per-test fixture cleanup) so CI never goes red randomly.
-Time-sensitive logic uses an injected `java.time.Clock` that tests freeze, so
-period math and JWT `exp`/`iat` assertions are exact rather than wall-clock
-dependent.
+Suite runs on H2 (`create-drop`), no network, injected `Clock` for deterministic
+JWT expiry and billing periods.
 
-Coverage by area:
+Coverage highlights:
 
-- **Google sign-in** (`GoogleOAuthIntegrationTest`): provisioner find/link/create
-  rules including sub-mismatch refusal, providers-flag shape, failure-handler
-  reason vocabulary, password-login guard for passwordless rows. OAuth tests
-  never hit the network - the Google side (consent/code/userinfo) is outside
-  what we own.
-- **Payments** (`PaymentServiceTest`): initialize/verify/webhook - signature
-  verification, amount-mismatch rejection, idempotent duplicate credits.
-- **JWT** (`JwtTokenProviderTest`): round-trip, expiry boundary (RFC 7519
-  reject-at-expiry), wrong-signature rejection - all against a frozen clock.
-- **Credits/subscriptions** (`SubscriptionTest`): available-credit math,
-  period rollover preserving purchased credits.
-- **Storage, AI analysis, rate limiting** (`StorageServiceTest`,
-  `AiAnalysisServiceTest`, `RateLimitingConfigTest`) and the profile-picture
-  integration suite.
+- **Google** — find/link/create, sub-mismatch refusal, providers flag, failure reasons
+- **Payments** — signature, amount mismatch, sequential duplicate webhook
+- **JWT** — round-trip, expiry boundary, wrong signature
+- **Credits** — available balance, period rollover preserving purchased credits
+- **Storage / AI / rate limit** — unit + integration slices
+
+---
+
+## Continuous integration
+
+GitHub Actions: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — build + test on push/PR.
+
+---
 
 ## Deployment
 
-Prod profile (`SPRING_PROFILES_ACTIVE=prod`): Supabase Postgres via the **transaction pooler**
-(`:6543`, keep `?prepareThreshold=0`), Upstash Redis, Supabase Storage over the S3 gateway
-(bucket private; downloads stream through the API), Brevo email. On Render:
+Prod profile (`SPRING_PROFILES_ACTIVE=prod`):
 
-1. Set env vars in the dashboard (Service -> Environment) per the list at the top
-   of `application-prod.properties`, **plus** `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`,
-   `FRONTEND_URL` = public SPA URL, `JWT_SECRET` (64+ bytes).
-2. Register the prod redirect URI in Google Cloud Console:
-   `https://<backend-host>/login/oauth2/code/google`
-   (else `redirect_uri_mismatch`; `{baseUrl}` derives the URI from
-   `X-Forwarded-*`, which is why `server.forward-headers-strategy=framework` matters).
-3. Flyway migrates on boot; health check `/actuator/health`.
+1. Supabase Postgres **transaction pooler** (`:6543`, keep `?prepareThreshold=0`)
+2. Upstash Redis, Supabase Storage (S3 gateway; private bucket; downloads via API)
+3. Render env vars from `application-prod.properties` (+ `GOOGLE_*`, `FRONTEND_URL`, `JWT_SECRET` 64+ bytes, Paystack keys)
+4. Google redirect: `https://<backend-host>/login/oauth2/code/google`
+5. Flyway on boot; health: `/actuator/health`
+
+Runbook: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+---
 
 ## Repository map
 
 ```
 src/main/java/com/contentanalytics/
-  config/SecurityConfig.java          JWT filter + oauth2Login wiring
-  security/
-    GoogleOAuth2UserService.java      verified-email gate, delegates to provisioner
-    OAuthAccountProvisioner.java      find-or-create / link / create-passwordless
-    OAuth2LoginSuccessHandler.java    mint JWT pair, cookies, redirect to /auth/callback?status=success
-    OAuth2LoginFailureHandler.java    fixed reason vocabulary, redirect to /auth/callback?status=error
-    JwtAuthenticationFilter.java      per-request cookie auth (unchanged by OAuth)
-  controller/AuthController.java      /api/auth/* including GET /providers
-  service/AuthService.java            register/login/refresh + issueTokens() shared by OAuth
-  entity/User.java + AuthProvider.java  provider + providerSubject columns
-  exception/AccountLinkingException.java  sub-mismatch signal (becomes 409)
-src/main/resources/db/migration/V11__Add_Google_OAuth_Support.sql
-src/test/java/com/contentanalytics/security/GoogleOAuthIntegrationTest.java
+  config/           Security, CORS, CSRF, WebSocket, RabbitMQ, Clock
+  controller/       Auth, Profile, Document, Payment, Subscription, Health
+  service/          Auth, Credits, Documents, Storage, AI, Idempotency, Locks
+  service/payment/  PaymentService, PaystackProvider
+  security/         JWT filter/provider, Google OAuth handlers + provisioner
+  aspect/           Idempotency, webhook idempotency, rate-limit annotations
+  entity/           User, Document, Subscription, PaymentTransaction, …
+  repository/       JPA + pessimistic lock queries
+  exception/        GlobalExceptionHandler + domain errors
+src/main/resources/db/migration/   Flyway V1–V15
+src/test/java/…                    H2 suite
 ```
+
+---
 
 ## Further docs
 
-> The [`docs/`](docs) folder holds the full reference set (the links below, plus
-> anything else living in there). For anything beyond this README - auth design,
-> the endpoint reference, deployment, local dev, architecture - **check the
-> `docs/` folder first**.
-
-- [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) - auth design: password +
-  Google flows, cookies, frontend `/auth/callback` contract, security rules.
-- [`docs/GOOGLE_OAUTH_SETUP.md`](docs/GOOGLE_OAUTH_SETUP.md) - step-by-step
-  Google Cloud Console checklist + local/prod verification.
-- [`docs/API.md`](docs/API.md) - endpoint reference.
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) - production runbook (Render +
-  Supabase + Upstash).
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) - local dev guide.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - module overview.
-
+| Doc | Contents |
+|---|---|
+| [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) | Password + Google, cookies, `/auth/callback` |
+| [`docs/GOOGLE_OAUTH_SETUP.md`](docs/GOOGLE_OAUTH_SETUP.md) | Google Cloud Console checklist |
+| [`docs/API.md`](docs/API.md) | Endpoint reference |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Render + Supabase + Upstash |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Local dev |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module overview |

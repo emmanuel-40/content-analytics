@@ -29,7 +29,7 @@ public interface SubscriptionRepository extends JpaRepository<Subscription, UUID
 
     /**
      * Load a subscription for update.
-     * <p>
+     * 
      * The pessimistic write lock serialises concurrent credit deductions for the same user.
      * Without it, two simultaneous AI requests could both read "1 credit remaining" and both
      * succeed, driving the balance negative.

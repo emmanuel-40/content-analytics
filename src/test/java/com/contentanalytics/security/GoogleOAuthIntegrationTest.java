@@ -37,13 +37,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * Google sign-up, end to end against the in-memory H2 schema.
- * <p>
+ * 
  * The Google side of the handshake (consent screen, code issuance, userinfo) cannot be
  * exercised here - there is no network and no credentials in the test profile. What is
  * under test is everything <i>we</i> own: the find-or-create/link rules, the shape of
  * the account that comes out, the browser-facing entry point and failure vocabulary,
  * and that none of it changed how password login behaves.
- * <p>
+ * 
  * Every fixture email contains {@code goauth-test} so cleanup is scoped to rows this
  * class created and it cannot delete data belonging to another test class.
  */
@@ -284,3 +284,4 @@ class GoogleOAuthIntegrationTest {
                 .isEqualTo("http://localhost:5173/auth/callback?status=error&reason=error");
     }
 }
+

@@ -9,6 +9,7 @@ import com.contentanalytics.repository.SubscriptionRepository;
 import com.contentanalytics.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -21,7 +22,7 @@ import java.util.UUID;
 
 /**
  * Credit accounting for the freemium model.
- * <p>
+ *
  * Every balance change writes an immutable ledger row so a user's credit history can be
  * reconstructed and audited. Deductions take a pessimistic row lock on the subscription to
  * stop two concurrent analyses from both spending the same final credit.
@@ -44,17 +45,38 @@ public class CreditService {
 
     /**
      * Fetch (or lazily create) a user's subscription, rolling the period forward if elapsed.
+     *
+     * Uses {@code SELECT ... FOR UPDATE} so concurrent calls for the same user serialize
+     * on the subscription row. If two requests both find no row, only one creates it;
+     * the other hits the unique constraint on {@code user_id} and re-reads the existing row.
      */
     @Transactional
     public Subscription getOrCreateSubscription(UUID userId) {
-        Subscription subscription = subscriptionRepository.findByUserId(userId)
-                .orElseGet(() -> createFreeSubscription(userId));
+        Subscription subscription = subscriptionRepository.findByUserIdForUpdate(userId)
+                .orElseGet(() -> createFreeSubscriptionIdempotent(userId));
 
         if (subscription.getPeriodEnd().isBefore(LocalDateTime.now(clock))) {
             rollPeriod(subscription);
         }
 
         return subscription;
+    }
+
+    /**
+     * Create a free subscription, but tolerate a concurrent creator: if the unique
+     * constraint on {@code user_id} is violated, another transaction already created
+     * the row — re-read and return it instead of failing.
+     */
+    private Subscription createFreeSubscriptionIdempotent(UUID userId) {
+        try {
+            return createFreeSubscription(userId);
+        } catch (org.springframework.dao.DataIntegrityViolationException e) {
+            // Another request created the subscription first; fetch it
+            log.debug("Concurrent subscription creation for user {} — fetching existing row", userId);
+            return subscriptionRepository.findByUserIdForUpdate(userId)
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Subscription race: neither created nor found for user " + userId));
+        }
     }
 
     private Subscription createFreeSubscription(UUID userId) {
@@ -106,7 +128,7 @@ public class CreditService {
 
     /**
      * Deduct credits for an AI analysis.
-     * <p>
+     * 
      * Runs in its own transaction so the deduction is committed even if the surrounding
      * document-processing transaction later rolls back.
      *
@@ -115,9 +137,17 @@ public class CreditService {
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void consumeCredits(UUID userId, int amount, UUID documentId) {
+        // Already charged for this document (retry / re-queue) — do not debit again
+        if (documentId != null
+                && creditTransactionRepository.existsByReferenceIdAndType(
+                        documentId.toString(), CreditTransactionType.AI_ANALYSIS)) {
+            log.info("Credits already consumed for document {} — skipping debit", documentId);
+            return;
+        }
+
         // Lock the subscription row so concurrent deductions serialise
         Subscription subscription = subscriptionRepository.findByUserIdForUpdate(userId)
-                .orElseGet(() -> createFreeSubscription(userId));
+                .orElseGet(() -> createFreeSubscriptionIdempotent(userId));
 
         if (subscription.getPeriodEnd().isBefore(LocalDateTime.now(clock))) {
             rollPeriod(subscription);
@@ -147,6 +177,10 @@ public class CreditService {
 
     /**
      * Add purchased credits (pay-as-you-go). Purchased credits survive the monthly reset.
+     *
+     * Takes a pessimistic write lock on the subscription row so concurrent purchases
+     * for the same user serialize. Retries on {@link OptimisticLockingFailureException}
+     * (bounded to 3 attempts) in case another transaction commits a version bump first.
      */
     @Transactional
     public SubscriptionDto purchaseCredits(UUID userId, int credits, String referenceId) {
@@ -154,47 +188,90 @@ public class CreditService {
             throw new IllegalArgumentException("Credit amount must be positive");
         }
 
-        Subscription subscription = subscriptionRepository.findByUserId(userId)
-                .orElseGet(() -> createFreeSubscription(userId));
+        // Same payment reference must never credit twice (webhook + verify race,
+        // or provider retry). Unique index uk_credit_tx_purchase_reference backs this.
+        if (referenceId != null && !referenceId.isBlank()
+                && creditTransactionRepository.existsByReferenceIdAndType(
+                        referenceId, CreditTransactionType.PURCHASE)) {
+            log.info("Purchase reference {} already credited — returning current balance", referenceId);
+            return toDto(getOrCreateSubscription(userId));
+        }
 
-        subscription.setPurchasedCredits(subscription.getPurchasedCredits() + credits);
-        subscriptionRepository.save(subscription);
+        int attempts = 0;
+        while (true) {
+            try {
+                Subscription subscription = subscriptionRepository.findByUserIdForUpdate(userId)
+                        .orElseGet(() -> createFreeSubscriptionIdempotent(userId));
 
-        recordTransaction(subscription, credits, CreditTransactionType.PURCHASE,
-                "Purchased " + credits + " credit(s)", referenceId);
+                // Re-check under the subscription lock in case another txn just wrote
+                if (referenceId != null && !referenceId.isBlank()
+                        && creditTransactionRepository.existsByReferenceIdAndType(
+                                referenceId, CreditTransactionType.PURCHASE)) {
+                    return toDto(subscription);
+                }
 
-        log.info("User {} purchased {} credit(s)", userId, credits);
-        return toDto(subscription);
+                subscription.setPurchasedCredits(subscription.getPurchasedCredits() + credits);
+                subscriptionRepository.save(subscription);
+
+                recordTransaction(subscription, credits, CreditTransactionType.PURCHASE,
+                        "Purchased " + credits + " credit(s)", referenceId);
+
+                log.info("User {} purchased {} credit(s)", userId, credits);
+                return toDto(subscription);
+            } catch (OptimisticLockingFailureException e) {
+                attempts++;
+                if (attempts >= 3) {
+                    log.warn("Optimistic lock retry exhausted for purchaseCredits user {}", userId);
+                    throw e;
+                }
+                log.debug("Optimistic lock conflict on purchaseCredits user {} — retry {}/3",
+                        userId, attempts);
+            }
+        }
     }
 
     /**
      * Change a user's tier, resetting the allowance to the new tier's value.
+     *
+     * Takes a pessimistic write lock on the subscription row so concurrent tier changes
+     * for the same user serialize. Retries on {@link OptimisticLockingFailureException}
+     * (bounded to 3 attempts).
      */
     @Transactional
     public SubscriptionDto changeTier(UUID userId, SubscriptionTier tier) {
-        Subscription subscription = subscriptionRepository.findByUserId(userId)
-                .orElseGet(() -> createFreeSubscription(userId));
+        int attempts = 0;
+        while (true) {
+            try {
+                Subscription subscription = subscriptionRepository.findByUserIdForUpdate(userId)
+                        .orElseGet(() -> createFreeSubscriptionIdempotent(userId));
 
-        subscription.setTier(tier);
-        subscription.rollPeriod(tier.getMonthlyCredits(), LocalDateTime.now(clock));
-        subscriptionRepository.save(subscription);
+                subscription.setTier(tier);
+                subscription.rollPeriod(tier.getMonthlyCredits(), LocalDateTime.now(clock));
+                subscriptionRepository.save(subscription);
 
-        recordTransaction(subscription, tier.getMonthlyCredits(), CreditTransactionType.ADMIN_ADJUSTMENT,
-                "Subscription changed to " + tier, null);
+                recordTransaction(subscription, tier.getMonthlyCredits(), CreditTransactionType.ADMIN_ADJUSTMENT,
+                        "Subscription changed to " + tier, null);
 
-        log.info("User {} changed tier to {}", userId, tier);
-        return toDto(subscription);
+                log.info("User {} changed tier to {}", userId, tier);
+                return toDto(subscription);
+            } catch (OptimisticLockingFailureException e) {
+                attempts++;
+                if (attempts >= 3) {
+                    log.warn("Optimistic lock retry exhausted for changeTier user {}", userId);
+                    throw e;
+                }
+                log.debug("Optimistic lock conflict on changeTier user {} — retry {}/3",
+                        userId, attempts);
+            }
+        }
     }
 
     /**
-     * Current subscription status for a user.
+     * Current subscription status for a user (creates the free tier row if missing).
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public SubscriptionDto getSubscription(UUID userId) {
-        Subscription subscription = subscriptionRepository.findByUserId(userId)
-                .orElseGet(() -> createFreeSubscription(userId));
-
-        return toDto(subscription);
+        return toDto(getOrCreateSubscription(userId));
     }
 
     /**

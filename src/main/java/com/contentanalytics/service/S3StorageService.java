@@ -58,7 +58,7 @@ public class S3StorageService {
 
     /**
      * Initialize the presigner used for private, time-limited URLs.
-     * <p>
+     * 
      * Built separately from the client because {@code S3Client} has no presigner factory.
      */
     private S3Presigner getS3Presigner() {
@@ -179,11 +179,11 @@ public class S3StorageService {
 
     /**
      * Generate a time-limited, signed URL for a private object.
-     * <p>
+     * 
      * This is how a private bucket stays private while still being renderable in a browser:
      * the backend hands out a short-lived URL instead of a permanent public one, so a leaked
      * link stops working on its own.
-     * <p>
+     * 
      * Supabase Storage supports presigning via query parameters using AWS Signature Version 4,
      * which is exactly what the SDK produces.
      *
@@ -213,7 +213,7 @@ public String generatePresignedUrl(String fileKey, java.time.Duration duration) 
 
 /**
      * Get a direct object URL.
-     * <p>
+     * 
      * Deprecated: this only resolves for a PUBLIC bucket. On a private bucket objects must be
      * served with {@link #generatePresignedUrl(String, java.time.Duration)}. No application
      * code calls this - document downloads are streamed through the backend instead.
@@ -247,7 +247,7 @@ public String generatePresignedUrl(String fileKey, java.time.Duration duration) 
 
     /**
      * Download a file from S3 into memory so it can be streamed to the client.
-     * <p>
+     * 
      * S3 does not expose a seekable stream through the sync client, so the object is buffered.
      * This is bounded by the configured maximum upload size.
      */

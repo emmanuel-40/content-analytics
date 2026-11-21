@@ -1,5 +1,8 @@
 package com.contentanalytics.controller;
 
+import com.contentanalytics.annotation.Idempotent;
+import com.contentanalytics.annotation.RateLimited;
+import com.contentanalytics.annotation.WebhookIdempotent;
 import com.contentanalytics.dto.InitializePaymentRequestDto;
 import com.contentanalytics.dto.InitializePaymentResponseDto;
 import com.contentanalytics.dto.PaymentTransactionDto;
@@ -21,7 +24,7 @@ import java.util.UUID;
 
 /**
  * Real-money checkout (Paystack, test mode until live keys land).
- * <p>
+ * 
  * The money flow never trusts the browser: {@code /initialize} creates a
  * PENDING row and returns a checkout URL; {@code /webhook} (Paystack -&gt; us,
  * HMAC-verified, then server-side re-queried) is the only path that flips a
@@ -40,7 +43,13 @@ public class PaymentController {
 
     /**
      * POST /api/payments/initialize - open a checkout for a fixed credit pack.
+     *
+     * Idempotent: a client retry with the same {@code Idempotency-Key} returns
+     * the cached checkout instead of creating a duplicate PENDING row.
+     * Rate-limited per IP to prevent checkout-storm abuse.
      */
+    @Idempotent(ttlHours = 24, required = true)
+    @RateLimited(maxRequests = 10, windowSeconds = 60, perUser = true)
     @PostMapping("/initialize")
     public ResponseEntity<InitializePaymentResponseDto> initialize(
             @Valid @RequestBody InitializePaymentRequestDto request) {
@@ -65,6 +74,9 @@ public class PaymentController {
      * the body is unreadable - Paystack retries non-2xx, and we must not turn a
      * duplicate delivery into an error storm.
      */
+    // Dedup by payment reference (unique per charge), never by event type name
+    // like "charge.success" which would block every subsequent payment.
+    @WebhookIdempotent(provider = "paystack", eventIdBodyField = "data.reference")
     @PostMapping("/webhook")
     public ResponseEntity<Map<String, String>> webhook(
             HttpServletRequest request,
@@ -123,3 +135,4 @@ public class PaymentController {
                 .build();
     }
 }
+

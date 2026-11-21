@@ -2,7 +2,7 @@ package com.contentanalytics.service;
 
 /**
  * Abstraction over the background job queue.
- * <p>
+ * 
  * Two implementations exist so the application runs both with and without external
  * infrastructure:
  * <ul>

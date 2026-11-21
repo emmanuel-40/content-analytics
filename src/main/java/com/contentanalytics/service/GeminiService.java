@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
 
 /**
  * Google Gemini implementation of {@link AiProvider}.
- * <p>
+ * 
  * Uses the free tier of the Gemini API. If no API key is configured the provider reports
  * itself unavailable and {@link AiAnalysisService} degrades gracefully to basic analysis
  * rather than failing the document.

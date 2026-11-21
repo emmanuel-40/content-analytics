@@ -9,8 +9,8 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
-import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
@@ -24,6 +24,10 @@ public interface CreditTransactionRepository extends JpaRepository<CreditTransac
     List<CreditTransaction> findByUserIdAndType(UUID userId, CreditTransactionType type);
 
     long countByUserIdAndType(UUID userId, CreditTransactionType type);
+
+    boolean existsByReferenceIdAndType(String referenceId, CreditTransactionType type);
+
+    Optional<CreditTransaction> findByReferenceIdAndType(String referenceId, CreditTransactionType type);
 
     /**
      * Total credits purchased by a user (lifetime), used for reporting.

@@ -19,7 +19,7 @@ import java.util.UUID;
 
 /**
  * Maps an external identity (Google) onto a row in {@code users}.
- * <p>
+ * 
  * Three outcomes, in priority order:
  * <ol>
  *   <li><b>Returning OAuth user</b> - the Google {@code sub} is already linked to a
@@ -31,7 +31,7 @@ import java.util.UUID;
  *   <li><b>New account</b> - create a passwordless row seeded with the profile data
  *       Google returned.</li>
  * </ol>
- * <p>
+ * 
  * Deliberate security property: an account already linked to a <i>different</i> Google
  * identity is never re-pointed. Google guarantees one {@code sub} per account and does
  * not let two accounts own the same address, so a mismatch means something is wrong
@@ -146,10 +146,14 @@ public class OAuthAccountProvisioner {
             log.info("Created Google-only account: {}", saved.getUsername());
             return saved;
         } catch (DataIntegrityViolationException e) {
-            // Two first-time Google sign-ups raced on the same derived username.
-            // Retry once with a random suffix so the sign-in still succeeds.
-            log.warn("Username collision on '{}' - retrying with a random suffix", username, e);
-            return userRepository.save(withUsername(user, fit(username + "-" + randomSuffix())));
+            // Concurrent first-time sign-up: either the same Google sub / email already
+            // landed, or two requests collided on the derived username.
+            return userRepository.findByProviderAndProviderSubject(AuthProvider.GOOGLE, subject)
+                    .or(() -> userRepository.findByEmail(email).map(existing -> link(existing, subject)))
+                    .orElseGet(() -> {
+                        log.warn("Username collision on '{}' - retrying with a random suffix", username, e);
+                        return userRepository.save(withUsername(user, fit(username + "-" + randomSuffix())));
+                    });
         }
     }
 
@@ -202,3 +206,4 @@ public class OAuthAccountProvisioner {
         return trimmed.length() > 255 ? trimmed.substring(0, 255) : trimmed;
     }
 }
+

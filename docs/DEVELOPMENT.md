@@ -28,7 +28,7 @@ Postgres + Redis with dev-safe defaults.
 ./mvnw test                     # full suite, H2 in-memory, no credentials
 ```
 
-Flyway migrates `V1`-`V13` automatically; Hibernate is `validate`-only, so a
+Flyway migrates `V1`-`V15` automatically; Hibernate is `validate`-only, so a
 schema mismatch fails fast instead of silently altering tables.
 
 To see SQL while debugging, create the git-ignored

@@ -13,7 +13,7 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * OpenAPI (Swagger) metadata for the API.
- * <p>
+ * 
  * Documents the Bearer JWT scheme so the Swagger UI "Authorize" button works out of the box.
  */
 @Configuration

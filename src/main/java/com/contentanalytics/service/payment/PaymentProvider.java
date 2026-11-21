@@ -4,13 +4,13 @@ import java.util.Map;
 
 /**
  * Payment gateway abstraction.
- * <p>
+ * 
  * Today Paystack is the only implementation. The interface exists so the
  * checkout flow ({@code PaymentService}) never touches provider HTTP details
  * directly - a second provider later is a new class, not a rewrite. The test
  * suite also implements this interface with a scripted stub (no network), so
  * the money-safety rules are asserted without calling Paystack.
- * <p>
+ * 
  * Implementations must never grant credits themselves - they report what the
  * provider said, and {@code PaymentService} decides what to persist.
  */
@@ -59,3 +59,4 @@ public interface PaymentProvider {
 
     record VerifyResult(boolean paid, int amountKobo, String paidAt) {}
 }
+

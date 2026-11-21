@@ -8,7 +8,7 @@ import java.util.UUID;
 
 /**
  * Default {@link JobQueue} implementation: executes work in-process on the async executor.
- * <p>
+ * 
  * Requires no external broker, which keeps local development and CI dependency-free.
  */
 @Service

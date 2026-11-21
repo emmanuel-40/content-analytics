@@ -1,5 +1,6 @@
 package com.contentanalytics.controller;
 
+import com.contentanalytics.annotation.RateLimited;
 import com.contentanalytics.dto.*;
 import com.contentanalytics.entity.User;
 import com.contentanalytics.exception.InvalidTokenException;
@@ -56,7 +57,7 @@ public class AuthController {
     /**
      * GET /api/auth/providers
      * Which external sign-in providers this deployment has credentials for.
-     * <p>
+     * 
      * Public: the SPA needs it before anyone has a session, so it can decide whether to
      * render "Continue with Google". Returns {@code false} while the Google client id
      * is still the placeholder (local dev without credentials, or prod before the
@@ -77,7 +78,10 @@ public class AuthController {
     /**
      * POST /api/auth/register
      * Register a new user
+     *
+     * Rate-limited per IP to prevent account farming / spam.
      */
+    @RateLimited(maxRequests = 3, windowSeconds = 900, perUser = false)
     @PostMapping("/register")
     public ResponseEntity<ApiResponse> register(
             @Valid @RequestBody RegisterRequestDto request) {
@@ -124,7 +128,11 @@ public class AuthController {
     /**
      * POST /api/auth/login
      * Authenticate user and return tokens
+     *
+     * Rate-limited per IP to prevent brute-force / credential-stuffing attacks.
+     * Account lockout after repeated failures is enforced by {@link AuthService}.
      */
+    @RateLimited(maxRequests = 5, windowSeconds = 900, perUser = false)
     @PostMapping("/login")
     public ResponseEntity<TokenResponseDto> login(
             @Valid @RequestBody LoginRequestDto request,
@@ -644,7 +652,7 @@ public class AuthController {
     /**
      * GET /api/auth/csrf
      * Returns the current CSRF token for the browser SPA.
-     * <p>
+     * 
      * The response also refreshes the {@code XSRF-TOKEN} cookie. The SPA should send the value
      * returned here in the {@code X-XSRF-TOKEN} header on every state-changing request.
      */

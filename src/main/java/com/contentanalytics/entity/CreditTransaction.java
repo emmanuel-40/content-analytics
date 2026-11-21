@@ -9,7 +9,7 @@ import java.util.UUID;
 
 /**
  * An append-only ledger entry recording a single credit movement.
- * <p>
+ * 
  * {@code amount} is signed: positive adds credits, negative consumes them.
  * {@code balanceAfter} stores the running balance so history can be replayed and audited
  * without recomputing from every previous row.
@@ -30,6 +30,10 @@ public class CreditTransaction {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
+
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version = 0L;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)

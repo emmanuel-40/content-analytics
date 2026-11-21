@@ -12,12 +12,12 @@ import java.util.Map;
 
 /**
  * Paystack (https://paystack.com) - cards, bank transfer, USSD, mobile money.
- * <p>
+ * 
  * Test mode uses {@code sk_test_...} keys and the fake card
  * {@code 4084 0840 8408 4081}: the whole flow runs end to end with zero real
  * money moving. Going live is a key swap on the Render dashboard only
  * ({@code PAYSTACK_SECRET_KEY} / {@code PAYSTACK_PUBLIC_KEY}) - no code change.
- * <p>
+ * 
  * Security posture: the browser callback URL is UX only. Credits move only
  * after (1) HMAC verification of the webhook and (2) a server-side
  * {@code GET /transaction/verify} confirming {@code status=success} for the
@@ -159,3 +159,4 @@ public class PaystackProvider implements PaymentProvider {
         return diff == 0;
     }
 }
+

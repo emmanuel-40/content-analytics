@@ -12,6 +12,7 @@ import com.contentanalytics.repository.EmailVerificationTokenRepository;
 import com.contentanalytics.repository.PasswordResetTokenRepository;
 import com.contentanalytics.repository.UserRepository;
 import com.contentanalytics.security.JwtTokenProvider;
+import com.contentanalytics.service.LoginAttemptService;
 import com.contentanalytics.util.TokenGenerationUtil;
 import io.jsonwebtoken.Claims;
 import lombok.RequiredArgsConstructor;
@@ -36,6 +37,7 @@ public class AuthService {
     private final UserRepository userRepository;
     private final JwtTokenProvider jwtTokenProvider;
     private final PasswordEncoder passwordEncoder;
+    private final LoginAttemptService loginAttemptService;
 
     private final EmailService emailService;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
@@ -294,6 +296,16 @@ public class AuthService {
      * Updated login to check email verification
      */
     public TokenResponseDto login(LoginRequestDto request) {
+        String username = request.getUsername();
+
+        // Hard lockout check — reject immediately if account is locked
+        if (loginAttemptService.isLocked(username)) {
+            long remaining = loginAttemptService.getLockoutRemainingSeconds(username);
+            log.warn("Login blocked — account locked: {} (retry in {}s)", username, remaining);
+            throw new InvalidTokenException(
+                    "Account is locked due to multiple failed login attempts. Try again in " + remaining + " seconds.");
+        }
+
         User user = userRepository.findByUsername(request.getUsername())
                 .orElseThrow(() -> {
                     log.warn("Login attempt with non-existent username: {}", request.getUsername());
@@ -324,7 +336,8 @@ public class AuthService {
 
         // Verify password
         if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
-            log.warn("Failed login attempt for user: {}", request.getUsername());
+            loginAttemptService.recordFailedAttempt(username);
+            log.warn("Failed login attempt for user: {}", username);
             throw new InvalidTokenException("Invalid credentials");
         }
 
@@ -332,6 +345,7 @@ public class AuthService {
         user.setLastLoginAt(LocalDateTime.now());
         userRepository.save(user);
         log.info("User logged in: {}", user.getUsername());
+        loginAttemptService.resetAttempts(username);
 
         return generateTokenResponse(user);
     }
@@ -435,7 +449,7 @@ public class AuthService {
     /**
      * Mint the access/refresh token pair for a user whose identity has already been
      * established.
-     * <p>
+     * 
      * The three sign-in paths - password login, refresh-token rotation and Google
      * sign-in - all route through here, so a session opened by OAuth is byte-identical
      * to one opened with a password from the JWT filter's point of view.
@@ -466,3 +480,4 @@ public class AuthService {
     }
 
 }
+

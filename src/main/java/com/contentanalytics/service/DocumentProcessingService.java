@@ -37,7 +37,7 @@ public class DocumentProcessingService {
 
     /**
      * Queue document for asynchronous processing.
-     * <p>
+     * 
      * This method is the async entry point and MUST be invoked through the Spring proxy
      * (i.e. injected by another bean). Calling an {@code @Async} method from within the same
      * bean bypasses the proxy and silently degrades to synchronous execution.
@@ -63,6 +63,16 @@ public class DocumentProcessingService {
 
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new RuntimeException("Document not found: " + documentId));
+
+        // Idempotent consume: already finished or already in flight (duplicate queue delivery)
+        if (document.getStatus() == DocumentStatus.COMPLETED) {
+            log.info("Document {} already COMPLETED — skipping duplicate job", documentId);
+            return;
+        }
+        if (document.getStatus() == DocumentStatus.PROCESSING) {
+            log.info("Document {} already PROCESSING — skipping duplicate job", documentId);
+            return;
+        }
 
         UUID userId = document.getUser().getId();
 
@@ -99,33 +109,27 @@ public class DocumentProcessingService {
             DocumentAnalysisResult analysis = null;
 
             if (aiAnalysisService.isEnabled()) {
-                // Charge the credit before doing the work. If the balance is empty we still
-                // complete basic analysis rather than failing the document outright.
-                if (creditService.hasCredits(userId)) {
-                    try {
-                        creditService.consumeCredits(userId, AI_ANALYSIS_CREDIT_COST, documentId);
-                        log.debug("Analysing document via AI provider '{}': {}", documentId,
-                                aiAnalysisService.getActiveProvider());
-                        analysis = aiAnalysisService.analyze(extractedText);
+                // Charge before work. consumeCredits is idempotent per documentId, so a
+                // retry after a prior charge (but failed AI call) does not debit again.
+                try {
+                    creditService.consumeCredits(userId, AI_ANALYSIS_CREDIT_COST, documentId);
+                    log.debug("Analysing document via AI provider '{}': {}", documentId,
+                            aiAnalysisService.getActiveProvider());
+                    analysis = aiAnalysisService.analyze(extractedText);
 
-                        if (analysis != null) {
-                            document.setSummary(analysis.getSummary());
-                            document.setKeyTopics(analysis.getKeyTopics());
-                            document.setSentiment(analysis.getSentiment());
-                            document.setConfidenceScore(analysis.getConfidenceScore());
-                            log.debug("AI analysis complete for document: {}", documentId);
-                        }
-                    } catch (InsufficientCreditsException e) {
-                        log.warn("No credits available for document {}, continuing with basic analysis: {}",
-                                documentId, e.getMessage());
-                    } catch (Exception e) {
-                        // Log warning but don't fail - basic analysis is enough
-                        log.warn("AI analysis failed for document {}, continuing with basic analysis: {}",
-                                documentId, e.getMessage());
+                    if (analysis != null) {
+                        document.setSummary(analysis.getSummary());
+                        document.setKeyTopics(analysis.getKeyTopics());
+                        document.setSentiment(analysis.getSentiment());
+                        document.setConfidenceScore(analysis.getConfidenceScore());
+                        log.debug("AI analysis complete for document: {}", documentId);
                     }
-                } else {
-                    log.info("User {} has no credits; skipping AI analysis for document {}",
-                            userId, documentId);
+                } catch (InsufficientCreditsException e) {
+                    log.warn("No credits available for document {}, continuing with basic analysis: {}",
+                            documentId, e.getMessage());
+                } catch (Exception e) {
+                    log.warn("AI analysis failed for document {}, continuing with basic analysis: {}",
+                            documentId, e.getMessage());
                 }
             } else {
                 log.debug("No AI provider available, skipping AI analysis for document: {}", documentId);
@@ -214,7 +218,7 @@ public class DocumentProcessingService {
 
     /**
      * Retry processing for a failed document.
-     * <p>
+     * 
      * Async entry point - must be called through the Spring proxy.
      */
     @Async
@@ -250,3 +254,4 @@ public class DocumentProcessingService {
     }
 
 }
+

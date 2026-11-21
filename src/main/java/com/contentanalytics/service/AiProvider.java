@@ -2,7 +2,7 @@ package com.contentanalytics.service;
 
 /**
  * Strategy interface for AI analysis backends.
- * <p>
+ * 
  * Implemented by {@link GeminiService} and {@link AnthropicService}. The active provider is
  * selected at runtime from {@code app.ai.provider}, so switching vendors is a one-line
  * configuration change rather than a code change.

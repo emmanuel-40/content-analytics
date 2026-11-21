@@ -1,5 +1,7 @@
 package com.contentanalytics.controller;
 
+import com.contentanalytics.annotation.Idempotent;
+import com.contentanalytics.annotation.RateLimited;
 import com.contentanalytics.dto.ApiResponse;
 import com.contentanalytics.dto.CreditTransactionDto;
 import com.contentanalytics.dto.PurchaseCreditsRequestDto;
@@ -74,12 +76,18 @@ public class SubscriptionController {
     /**
      * POST /api/subscription/purchase-credits
      * Buy additional credits (pay-as-you-go). Purchased credits survive the monthly reset.
-     * <p>
+     *
+     * Idempotent: a client retry with the same {@code Idempotency-Key} returns
+     * the cached result instead of double-crediting.
+     * Rate-limited per user to prevent purchase-storm abuse.
+     *
      * ADMIN/TEST ONLY. This endpoint grants credits without money moving and
      * exists so integration tests and local demos can seed balances. Real
      * purchases flow through {@code POST /api/payments/initialize} and are
      * credited by the verified Paystack webhook - never by this endpoint.
      */
+    @Idempotent(ttlHours = 24, required = true)
+    @RateLimited(maxRequests = 10, windowSeconds = 60, perUser = true)
     @PostMapping("/purchase-credits")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse> purchaseCredits(

@@ -9,7 +9,7 @@ import java.util.UUID;
 
 /**
  * Audit trail entry for security-relevant and billing events.
- * <p>
+ * 
  * {@code userId} is deliberately nullable with {@code ON DELETE SET NULL} so that deleting a
  * user does not erase the record of what they did.
  */

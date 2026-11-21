@@ -9,7 +9,7 @@ import lombok.NoArgsConstructor;
 
 /**
  * Start a real-money checkout.
- * <p>
+ * 
  * Only fixed packs are accepted ({@code 10}, {@code 50}, {@code 120}) - the
  * price list lives server-side in {@code PaymentService.CREDIT_PACKS}, so a
  * client can never invent its own price.
@@ -24,3 +24,4 @@ public class InitializePaymentRequestDto {
     @Min(value = 1, message = "Must buy at least 1 credit")
     private Integer credits;
 }
+

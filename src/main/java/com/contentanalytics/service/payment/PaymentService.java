@@ -11,13 +11,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /**
  * Checkout orchestration: initialize, webhook, verify, refund.
- * <p>
+ * 
  * The invariant everything here protects: <b>credits move if and only if the
  * webhook path flips a PENDING row to SUCCESS after HMAC verification and a
  * server-side re-query</b>. The browser callback, the frontend, and repeated
@@ -122,9 +121,13 @@ public class PaymentService {
         return applyVerifiedPayment(ref.get(), payload.toString());
     }
 
+    /**
+     * Credit a verified payment exactly once. Takes a pessimistic row lock so
+     * concurrent webhook + browser-verify for the same reference serialize.
+     */
     @Transactional
     public java.util.Optional<String> applyVerifiedPayment(String reference, String rawWebhook) {
-        PaymentTransaction tx = paymentRepository.findByReference(reference).orElse(null);
+        PaymentTransaction tx = paymentRepository.findByReferenceForUpdate(reference).orElse(null);
         if (tx == null) {
             log.warn("Webhook for unknown reference {}", reference);
             return java.util.Optional.empty();
@@ -156,6 +159,7 @@ public class PaymentService {
             return java.util.Optional.empty();
         }
 
+        // Idempotent at the ledger: same reference never grants credits twice
         creditService.purchaseCredits(tx.getUser().getId(), tx.getCredits(), reference);
         tx.setStatus(PaymentStatus.SUCCESS);
         tx.setPaidAt(LocalDateTime.now());
@@ -178,7 +182,7 @@ public class PaymentService {
      */
     @Transactional
     public PaymentTransaction verifyAndApply(String reference) {
-        java.util.Optional<String> applied = applyVerifiedPayment(reference, "browser-callback");
+        applyVerifiedPayment(reference, "browser-callback");
         return paymentRepository.findByReference(reference)
                 .orElseThrow(() -> new IllegalArgumentException("Unknown payment reference"));
     }

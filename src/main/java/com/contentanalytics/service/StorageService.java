@@ -53,7 +53,7 @@ public class StorageService {
 
     /**
      * Generate a short-lived signed URL for a stored object.
-     * <p>
+     * 
      * Used so a private bucket never has to be made public: the client receives a temporary
      * link instead of a permanent one.
      */
@@ -67,7 +67,7 @@ public class StorageService {
 
     /**
      * Persist raw bytes under an explicitly-chosen key.
-     * <p>
+     * 
      * The image pipeline mints its own deterministic keys
      * ({@code profile-{userId}-{size}-{timestamp}.jpg}) because those exact strings are what
      * gets stored in the {@code profile_pictures} columns and later turned into signed URLs.
@@ -120,7 +120,7 @@ public class StorageService {
 
     /**
      * Load a stored file as a Spring {@link Resource} for streaming back to a client.
-     * <p>
+     * 
      * S3 keys are fetched into memory (bounded by the configured upload cap); local files are
      * returned as a filesystem resource so large documents stream without buffering.
      */

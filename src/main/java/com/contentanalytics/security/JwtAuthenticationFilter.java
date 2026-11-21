@@ -72,7 +72,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     /**
      * Extract the JWT from the request.
-     * <p>
+     * 
      * Order of precedence:
      * <ol>
      *   <li>{@code Authorization: Bearer <token>} header - used by non-browser clients

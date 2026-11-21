@@ -22,13 +22,13 @@ import java.util.UUID;
 
 /**
  * Hands a successful Google handshake over to the existing JWT session.
- * <p>
+ * 
  * The browser arrives here as a top-level navigation from Google, so the only useful
  * response is a redirect back to the SPA with cookies attached - there is no request
  * body to put tokens in. We mint the exact same access + refresh pair that
  * {@code POST /api/auth/login} produces, store them in the same HttpOnly cookies, and
  * bounce to {@code <frontend>/auth/callback} so the SPA can settle its own state.
- * <p>
+ * 
  * Nothing about this class is Google-specific beyond the attribute keys; a second
  * provider would reuse it unchanged.
  */
@@ -100,3 +100,4 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
         return Math.max(1, millis / 1000);
     }
 }
+

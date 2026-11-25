@@ -5,6 +5,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -12,6 +13,7 @@ import org.springframework.data.redis.core.ValueOperations;
 import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
@@ -102,5 +104,20 @@ class LoginAttemptServiceTest {
     void ttlActualWhenLocked() {
         when(redis.getExpire(anyString())).thenReturn(1200L);
         assertThat(service.getLockoutRemainingSeconds("alice")).isEqualTo(1200);
+    }
+
+    @Test
+    @DisplayName("Redis outage fails open so the credential check still runs")
+    void redisOutageFailsOpen() {
+        RedisConnectionFailureException outage = new RedisConnectionFailureException("redis down");
+        when(redis.hasKey(anyString())).thenThrow(outage);
+        when(redis.getExpire(anyString())).thenThrow(outage);
+        when(redis.opsForValue()).thenThrow(outage);
+        doThrow(outage).when(redis).delete(anyString());
+
+        assertThat(service.isLocked("alice")).isFalse();
+        assertThat(service.getLockoutRemainingSeconds("alice")).isEqualTo(-1);
+        assertThat(service.recordFailedAttempt("alice")).isZero();
+        assertThatCode(() -> service.resetAttempts("alice")).doesNotThrowAnyException();
     }
 }

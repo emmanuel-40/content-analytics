@@ -3,6 +3,7 @@ package com.contentanalytics.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -20,6 +21,9 @@ import java.time.Duration;
  * locked even if the attacker rotates source addresses. Counters and locks both
  * expire automatically so a temporary password spray cannot permanently disable
  * an account.
+ *
+ * Redis is best-effort here: an outage fails open so the real credential check
+ * in the database still decides whether a login succeeds.
  */
 @Service
 @RequiredArgsConstructor
@@ -44,17 +48,25 @@ public class LoginAttemptService {
      * Returns {@code true} if the account is currently locked out.
      */
     public boolean isLocked(String username) {
-        String lockKey = LOCK_PREFIX + username;
-        return Boolean.TRUE.equals(redis.hasKey(lockKey));
+        try {
+            return Boolean.TRUE.equals(redis.hasKey(LOCK_PREFIX + username));
+        } catch (DataAccessException e) {
+            log.warn("Login lockout store unavailable - allowing attempt for {}: {}", username, e.getMessage());
+            return false;
+        }
     }
 
     /**
      * Returns the remaining lockout time in seconds, or -1 if not locked.
      */
     public long getLockoutRemainingSeconds(String username) {
-        String lockKey = LOCK_PREFIX + username;
-        Long ttl = redis.getExpire(lockKey);
-        return ttl != null ? ttl : -1;
+        try {
+            Long ttl = redis.getExpire(LOCK_PREFIX + username);
+            return ttl != null ? ttl : -1;
+        } catch (DataAccessException e) {
+            log.warn("Login lockout TTL unavailable for {}: {}", username, e.getMessage());
+            return -1;
+        }
     }
 
     /**
@@ -65,30 +77,38 @@ public class LoginAttemptService {
      * @return number of failed attempts recorded so far for this username
      */
     public int recordFailedAttempt(String username) {
-        String attemptsKey = ATTEMPTS_PREFIX + username;
-        Long count = redis.opsForValue().increment(attemptsKey);
+        try {
+            String attemptsKey = ATTEMPTS_PREFIX + username;
+            Long count = redis.opsForValue().increment(attemptsKey);
 
-        // Set expiry on first failure of the window
-        if (count != null && count == 1) {
-            redis.expire(attemptsKey, Duration.ofMinutes(resetMinutes));
+            // Set expiry on first failure of the window
+            if (count != null && count == 1) {
+                redis.expire(attemptsKey, Duration.ofMinutes(resetMinutes));
+            }
+
+            if (count != null && count >= maxAttempts) {
+                redis.opsForValue().setIfAbsent(LOCK_PREFIX + username, "locked",
+                        Duration.ofMinutes(lockoutMinutes));
+                log.warn("Account locked for {} after {} failed attempts", username, count);
+            }
+
+            return count != null ? count.intValue() : 0;
+        } catch (DataAccessException e) {
+            log.warn("Failed to record login attempt for {}: {}", username, e.getMessage());
+            return 0;
         }
-
-        if (count != null && count >= maxAttempts) {
-            String lockKey = LOCK_PREFIX + username;
-            redis.opsForValue().setIfAbsent(lockKey, "locked",
-                    Duration.ofMinutes(lockoutMinutes));
-            log.warn("Account locked for {} after {} failed attempts", username, count);
-        }
-
-        return count != null ? count.intValue() : 0;
     }
 
     /**
      * Resets the failure counter and removes any lock after a successful login.
      */
     public void resetAttempts(String username) {
-        redis.delete(ATTEMPTS_PREFIX + username);
-        redis.delete(LOCK_PREFIX + username);
-        log.debug("Reset login attempts for {}", username);
+        try {
+            redis.delete(ATTEMPTS_PREFIX + username);
+            redis.delete(LOCK_PREFIX + username);
+            log.debug("Reset login attempts for {}", username);
+        } catch (DataAccessException e) {
+            log.warn("Failed to reset login attempts for {}: {}", username, e.getMessage());
+        }
     }
 }

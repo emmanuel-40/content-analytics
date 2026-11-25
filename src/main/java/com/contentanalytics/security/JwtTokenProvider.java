@@ -34,7 +34,7 @@ public class JwtTokenProvider {
 
     /**
      * Single source of "now" for stamping and checking token times.
-     * 
+     *
      * Injected rather than calling {@code new Date()} / {@code System.currentTimeMillis()}
      * directly so tests can pin it to a fixed instant: issued-at and expiry become exact,
      * assertable values, and "is this token expired?" can be stepped across its boundary
@@ -47,10 +47,25 @@ public class JwtTokenProvider {
      * Used for API requests
      */
     public String generateAccessToken(UUID userId, String username, String email) {
+        // Legacy/helper callers have no version to stamp; the filter will treat a
+        // missing claim as stale rather than silently accepting an unverifiable token.
+        return generateAccessToken(userId, username, email, null);
+    }
+
+    /**
+     * Access token that carries the user's current tokenVersion. The JWT filter
+     * compares that claim with the database on every authenticated request, so a
+     * logout/password change (which bumps the version) invalidates already-issued
+     * access tokens immediately instead of waiting for their 15-minute expiry.
+     */
+    public String generateAccessToken(UUID userId, String username, String email, Integer tokenVersion) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("type", "ACCESS");
         claims.put("email", email);
         claims.put("userId", userId.toString());
+        if (tokenVersion != null) {
+            claims.put("tokenVersion", tokenVersion);
+        }
 
         return createToken(claims, username, jwtExpirationMs);
     }
@@ -60,13 +75,17 @@ public class JwtTokenProvider {
      * Used to get new access tokens
      *
      * @param tokenVersion current token version of the user, embedded so that
-     *                     bulk invalidation (e.g. password change) can be detected
+     * bulk invalidation (e.g. password change) can be detected
      */
     public String generateRefreshToken(UUID userId, String username, Integer tokenVersion) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("type", "REFRESH");
         claims.put("userId", userId.toString());
         claims.put("tokenVersion", tokenVersion);
+        // A random id guarantees that two tokens minted for the same user in the
+        // same millisecond are different strings - otherwise their SHA-256
+        // hashes would collide in refresh_tokens.token_hash on rotation.
+        claims.put("jti", UUID.randomUUID().toString());
 
         return createToken(claims, username, refreshTokenExpirationMs);
     }
@@ -92,8 +111,8 @@ public class JwtTokenProvider {
 
     /**
      * Extract claims from token.
-     * 
-     * Signature is always verified. Expiry, however, is <em>not</em> enforced here: a
+     *
+     * Signature is always verified. Expiry, however, is not enforced here: a
      * validly-signed token whose {@code exp} is in the past still returns its claims, and
      * the accept/reject decision is made by {@link #isTokenExpired(Claims)} against the
      * injected {@link Clock}. That keeps "now" in one place (the clock) instead of the JWT
@@ -201,9 +220,9 @@ public class JwtTokenProvider {
 
     /**
      * Check if token is expired.
-     * 
+     *
      * RFC 7519: a token MUST be rejected once the current time is at or past {@code exp},
-     * so the comparison is {@code !exp.after(now)} (i.e. {@code now >= exp} is expired),
+     * so the comparison is {@code !exp.after(now)} (i.e. {@code now = exp} is expired),
      * not {@code exp.before(now)} - which would wrongly accept the exact-expiration instant.
      */
     public boolean isTokenExpired(Claims claims) {
@@ -233,6 +252,31 @@ public class JwtTokenProvider {
     public boolean isRefreshToken(String token) {
         Claims claims = getClaimsFromToken(token);
         return claims != null && "REFRESH".equals(claims.get("type"));
+    }
+
+    /** Token version embedded at issue time, or {@code null} for legacy tokens. */
+    public Integer getTokenVersionFromToken(String token) {
+        Claims claims = getClaimsFromToken(token);
+        if (claims == null || !(claims.get("tokenVersion") instanceof Number version)) {
+            return null;
+        }
+        return version.intValue();
+    }
+
+    /** Unique id of a refresh token, used only to keep successive tokens distinct. */
+    public String getTokenIdFromToken(String token) {
+        Claims claims = getClaimsFromToken(token);
+        return claims == null ? null : (String) claims.get("jti");
+    }
+
+    /**
+     * Version check used by the JWT filter. A token with no version claim is
+     * rejected: there is no way to prove it is still current, and access tokens
+     * are short-lived enough that re-login is the correct outcome.
+     */
+    public boolean hasCurrentTokenVersion(String token, Integer currentVersion) {
+        Integer tokenVersion = getTokenVersionFromToken(token);
+        return tokenVersion != null && currentVersion != null && tokenVersion.equals(currentVersion);
     }
 
 }

@@ -85,7 +85,12 @@ public class SecurityConfig {
                                 "/api/auth/resend-verification-email",
                                 "/api/auth/forgot-password",
                                 "/api/auth/reset-password",
-                                "/api/auth/verify-token/**"
+                                "/api/auth/verify-token/**",
+                                // Paystack's server has no browser session/CSRF cookie.
+                                // This endpoint is authenticated by HMAC-SHA512 over the
+                                // raw request body (see PaystackProvider), which is the
+                                // machine-to-machine equivalent of CSRF protection.
+                                "/api/payments/webhook"
                         )
                         // Swagger UI and WebSocket handshake are not browser-session driven
                         .ignoringRequestMatchers(

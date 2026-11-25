@@ -9,7 +9,7 @@ import lombok.NoArgsConstructor;
 
 /**
  * Request to purchase additional credits (pay-as-you-go).
- * 
+ *
  * The payment provider reference is optional so the flow can be exercised before a payment
  * gateway is wired in.
  */

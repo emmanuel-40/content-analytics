@@ -19,7 +19,7 @@ import java.util.Map;
 
 /**
  * Turns a Google OIDC userinfo response into our own authenticated principal.
- * 
+ *
  * Runs after Spring Security has already validated the authorization code, {@code state}
  * and {@code nonce} and fetched {@code /v1/userinfo}. Everything below is application
  * policy: require a Google-verified email, find-or-create the local row, then expose the

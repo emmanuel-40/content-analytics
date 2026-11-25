@@ -17,7 +17,7 @@ public class InitializePaymentResponseDto {
     private String reference;
     private String checkoutUrl;
     private String accessCode;
-    private int amountKobo;
+    private int amountCents;
     private int credits;
     private String status;
     private String publicKey;

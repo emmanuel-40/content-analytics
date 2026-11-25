@@ -5,7 +5,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Mockito;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -13,6 +14,7 @@ import java.time.Duration;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -27,14 +29,20 @@ import static org.mockito.Mockito.*;
 @DisplayName("IdempotencyService")
 class IdempotencyServiceTest {
 
+    @Mock
     private StringRedisTemplate redis;
+
+    @Mock
     private ValueOperations<String, String> ops;
+
+    @Mock
+    private IdempotencyService.IdempotencyOperation<String> op;
+
     private IdempotencyService service;
 
     @BeforeEach
     void setUp() {
-        redis = mock(StringRedisTemplate.class);
-        ops = mock(ValueOperations.class);
+        MockitoAnnotations.openMocks(this);
         when(redis.opsForValue()).thenReturn(ops);
         service = new IdempotencyService(redis, new ObjectMapper());
     }
@@ -61,9 +69,6 @@ class IdempotencyServiceTest {
         String json = "{\"status\":200,\"headers\":{},\"body\":\"cached-body\"}";
         when(ops.get(eq("idem:endpoint:key-1"))).thenReturn(json);
 
-        IdempotencyService.IdempotencyOperation<String> op = mock(
-                IdempotencyService.IdempotencyOperation.class);
-
         IdempotencyService.CachedResponse<String> result =
                 service.execute("key-1", "endpoint", 24, op);
 
@@ -72,19 +77,43 @@ class IdempotencyServiceTest {
     }
 
     @Test
-    @DisplayName("concurrent pending — second caller detects first is in flight")
+    @DisplayName("concurrent pending — second caller fails closed instead of double-executing")
     void concurrentPendingDetectsInFlight() {
         when(ops.get(anyString())).thenReturn(null);
         when(ops.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(false);
-        // After SET NX fails, get returns __PENDING__
+        // After SET NX fails, get keeps returning __PENDING__
         when(ops.get(eq("idem:endpoint:key-1"))).thenReturn("__PENDING__");
 
-        IdempotencyService.CachedResponse<String> result =
-                service.execute("key-1", "endpoint", 24,
-                        () -> new IdempotencyService.CachedResponse<>(200, Map.of(), "body"));
+        assertThatThrownBy(() -> service.execute("key-1", "endpoint", 24, op))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already in progress");
+        verifyNoInteractions(op);
+    }
 
-        // Falls through and executes (retry-safe business logic)
+    @Test
+    @DisplayName("Redis outage — operation still executes (DB guards remain authoritative)")
+    void redisOutageFailsOpen() {
+        when(redis.opsForValue()).thenThrow(new RuntimeException("redis down"));
+        when(op.execute()).thenReturn(new IdempotencyService.CachedResponse<>(200, Map.of(), "body"));
+
+        IdempotencyService.CachedResponse<String> result =
+                service.execute("key-1", "endpoint", 24, op);
+
         assertThat(result.body()).isEqualTo("body");
+        verify(op, times(1)).execute();
+    }
+
+    @Test
+    @DisplayName("operation failure — claim is released for a later retry")
+    void failureReleasesClaim() {
+        when(ops.get(anyString())).thenReturn(null);
+        when(ops.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
+
+        assertThatThrownBy(() -> service.execute("key-1", "endpoint", 24, () -> {
+            throw new IllegalStateException("provider down");
+        })).isInstanceOf(IllegalStateException.class);
+
+        verify(redis).delete("idem:endpoint:key-1");
     }
 
     @Test

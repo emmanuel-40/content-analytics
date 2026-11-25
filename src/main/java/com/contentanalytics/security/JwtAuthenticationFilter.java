@@ -26,6 +26,7 @@ import java.util.Map;
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtTokenProvider tokenProvider;
+    private final TokenSessionValidator sessionValidator;
     private static final String USER_ID_ATTRIBUTE = "userId";
     private static final String EMAIL_ATTRIBUTE = "email";
     private static final String ACCESS_TOKEN_COOKIE = "accessToken";
@@ -34,12 +35,17 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
 
+        // Never inherit an authentication from a previous request on a reused thread.
+        SecurityContextHolder.clearContext();
+
         try {
-            // Extract token from Authorization header
+            // Extract token from Authorization header (or the accessToken cookie)
             String token = getJwtFromRequest(request);
 
-            // If token exists and is valid
-            if (token != null && tokenProvider.validateToken(token)) {
+            // A valid signature is not sufficient: the user must still be ACTIVE and
+            // the token version must still match what is in the database. Requests
+            // without a token (public routes) never reach the repository lookup.
+            if (token != null && tokenProvider.validateToken(token) && sessionValidator.isValidSession(token)) {
                 // Only process ACCESS tokens, not refresh tokens
                 if (tokenProvider.isAccessToken(token)) {
                     String username = tokenProvider.getUsernameFromToken(token);
@@ -72,15 +78,14 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     /**
      * Extract the JWT from the request.
-     * 
+     *
      * Order of precedence:
-     * <ol>
-     *   <li>{@code Authorization: Bearer <token>} header - used by non-browser clients
-     *       (curl, mobile apps, service-to-service calls)</li>
-     *   <li>{@code accessToken} HTTP-only cookie - the primary mechanism for browsers,
-     *       because it cannot be read by injected JavaScript</li>
-     * </ol>
-     */
+     *
+     *   {@code Authorization: Bearer TOKEN} header - used by non-browser clients
+     * (curl, mobile apps, service-to-service calls)
+     * {@code accessToken} HTTP-only cookie - the primary mechanism for browsers,
+     * because it cannot be read by injected JavaScript
+     * */
     private String getJwtFromRequest(HttpServletRequest request) {
         String bearerToken = request.getHeader(HttpHeaders.AUTHORIZATION);
 

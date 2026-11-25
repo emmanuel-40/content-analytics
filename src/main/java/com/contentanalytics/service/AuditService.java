@@ -16,7 +16,7 @@ import java.util.UUID;
 
 /**
  * Writes security-relevant and billing events to an append-only audit trail.
- * 
+ *
  * Logging is deliberately best-effort: a failure to record an audit entry must never break
  * the business operation that triggered it, hence {@code REQUIRES_NEW} and a caught exception.
  */

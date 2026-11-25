@@ -24,6 +24,7 @@ import org.springframework.web.context.request.RequestContextHolder;
 
 import java.time.LocalDateTime;
 import java.util.Map;
+import java.util.UUID;
 import com.contentanalytics.repository.EmailVerificationTokenRepository;
 import com.contentanalytics.repository.PasswordResetTokenRepository;
 
@@ -57,7 +58,7 @@ public class AuthController {
     /**
      * GET /api/auth/providers
      * Which external sign-in providers this deployment has credentials for.
-     * 
+     *
      * Public: the SPA needs it before anyone has a session, so it can decide whether to
      * render "Continue with Google". Returns {@code false} while the Google client id
      * is still the placeholder (local dev without credentials, or prod before the
@@ -169,7 +170,7 @@ public class AuthController {
      *
      * Request body:
      * {
-     *   "token": "eyJhbGciOiJIUzUxMiJ9..."
+     * "token": "eyJhbGciOiJIUzUxMiJ9..."
      * }
      */
     @PostMapping("/verify-email")
@@ -487,8 +488,8 @@ public class AuthController {
                     .data(tokenResponse)
                     .build());
 
-        } catch (InvalidTokenException e) {
-            log.warn("Token refresh failed - invalid token");
+        } catch (InvalidTokenException | UserNotFoundException e) {
+            log.warn("Token refresh failed - invalid token or unknown user");
             cookieUtil.clearRefreshTokenCookie(response);
             cookieUtil.clearAccessTokenCookie(response);
 
@@ -513,17 +514,27 @@ public class AuthController {
      * Logout the authenticated user
      */
     @PostMapping("/logout")
-    public ResponseEntity<ApiResponse> logout(HttpServletResponse response) {
+    public ResponseEntity<ApiResponse> logout(
+            @CookieValue(value = "refreshToken", required = false) String refreshToken,
+            HttpServletResponse response) {
 
         log.info("Logout request");
 
         try {
-            // Get authenticated user
+            // Revoke the presented refresh token and the user's whole token family.
+            // Clearing cookies alone would leave a stolen refresh token usable.
             Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-
+            UUID userId = null;
             if (authentication != null && authentication.isAuthenticated()) {
                 String username = authentication.getName();
+                userId = authService.getCurrentUser(username).getId();
                 log.info("Logout for user: {}", username);
+            }
+
+            if (userId != null) {
+                authService.logout(userId, refreshToken);
+            } else {
+                authService.logout(refreshToken);
             }
 
             // Clear both token cookies
@@ -652,7 +663,7 @@ public class AuthController {
     /**
      * GET /api/auth/csrf
      * Returns the current CSRF token for the browser SPA.
-     * 
+     *
      * The response also refreshes the {@code XSRF-TOKEN} cookie. The SPA should send the value
      * returned here in the {@code X-XSRF-TOKEN} header on every state-changing request.
      */

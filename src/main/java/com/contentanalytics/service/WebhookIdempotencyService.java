@@ -17,6 +17,11 @@ import java.time.Duration;
  *
  * Keys use a 7-day TTL: Paystack retries failed webhooks for up to 24h, and
  * a week gives ample margin while preventing unbounded Redis growth.
+ *
+ * Security: callers must verify the provider HMAC before calling any
+ * method here. Dedupe keys derived from unverified bodies let an attacker burn
+ * the key for a legitimate event. {@code PaymentService} does this in that order
+ * and releases the claim for every outcome that does not credit an account.
  */
 @Service
 @RequiredArgsConstructor

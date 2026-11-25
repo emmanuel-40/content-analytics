@@ -36,14 +36,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * These exist because the bugs they cover are invisible to unit tests: both were
  * constraint violations that only a real database could raise.
- *
- * <ul>
- *   <li>{@code Optional.orElse(createDefaultProfile(user))} evaluated its argument
- *       <em>eagerly</em>, so every profile read inserted a {@code user_profiles} row.</li>
- *   <li>{@code profile_pictures.user_id} is UNIQUE, but upload inserted a second row
- *       instead of updating the first, so re-uploading an avatar returned a 500.</li>
- * </ul>
- *
+ * *
+ * {@code Optional.orElse(createDefaultProfile(user))} evaluated its argument
+ * eagerly, so every profile read inserted a {@code user_profiles} row.
+ * {@code profile_pictures.user_id} is UNIQUE, but upload inserted a second row
+ * instead of updating the first, so re-uploading an avatar returned a 500.
+ * *
  * The {@code test} profile pins the datasource to H2 in
  * {@code src/test/resources/application-test.properties}; {@link #testsRunAgainstH2()}
  * is a tripwire that fails loudly if that is ever bypassed.

@@ -71,6 +71,14 @@ public class Document {
     @Column
     private LocalDateTime processingCompletedAt;
 
+    /**
+     * Optimistic lock token. Every status transition increments it, so a stale worker
+     * (or a duplicate queue delivery) cannot overwrite a newer state.
+     */
+    @Version
+    @Column(nullable = false)
+    private Long version;
+
     // Metadata after processing
     @Column(columnDefinition = "TEXT")
     private String extractedText; // Raw text from document

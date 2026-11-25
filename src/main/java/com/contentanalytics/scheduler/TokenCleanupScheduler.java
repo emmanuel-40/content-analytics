@@ -2,6 +2,7 @@ package com.contentanalytics.scheduler;
 
 import com.contentanalytics.repository.EmailVerificationTokenRepository;
 import com.contentanalytics.repository.PasswordResetTokenRepository;
+import com.contentanalytics.repository.RefreshTokenRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -17,6 +18,7 @@ public class TokenCleanupScheduler {
 
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
     private final PasswordResetTokenRepository passwordResetTokenRepository;
+    private final RefreshTokenRepository refreshTokenRepository;
 
     /**
      * Clean up expired tokens every day at 2 AM
@@ -36,6 +38,11 @@ public class TokenCleanupScheduler {
         // Delete expired password reset tokens
         passwordResetTokenRepository.deleteByExpiryDateBefore(now);
         log.debug("Expired password reset tokens cleaned up");
+
+        // Expired refresh tokens can no longer be presented (the JWT is expired too),
+        // so keeping their hashes serves no replay-detection purpose.
+        refreshTokenRepository.deleteByExpiresAtBefore(now);
+        log.debug("Expired refresh tokens cleaned up");
 
         log.info("Token cleanup completed");
     }

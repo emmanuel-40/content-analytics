@@ -2,7 +2,6 @@ package com.contentanalytics.controller;
 
 import com.contentanalytics.annotation.Idempotent;
 import com.contentanalytics.annotation.RateLimited;
-import com.contentanalytics.annotation.WebhookIdempotent;
 import com.contentanalytics.dto.InitializePaymentRequestDto;
 import com.contentanalytics.dto.InitializePaymentResponseDto;
 import com.contentanalytics.dto.PaymentTransactionDto;
@@ -24,9 +23,9 @@ import java.util.UUID;
 
 /**
  * Real-money checkout (Paystack, test mode until live keys land).
- * 
+ *
  * The money flow never trusts the browser: {@code /initialize} creates a
- * PENDING row and returns a checkout URL; {@code /webhook} (Paystack -&gt; us,
+ * PENDING row and returns a checkout URL; {@code /webhook} (Paystack  to  us,
  * HMAC-verified, then server-side re-queried) is the only path that flips a
  * row to SUCCESS and grants credits; {@code /verify} lets the returning
  * browser reconcile through the same verified path.
@@ -61,7 +60,7 @@ public class PaymentController {
                 .reference(tx.getReference())
                 .checkoutUrl(tx.getCheckoutUrl())
                 .accessCode("")
-                .amountKobo(tx.getAmountKobo())
+                .amountCents(tx.getAmountCents())
                 .credits(tx.getCredits())
                 .status(tx.getStatus().name())
                 .publicKey(paystackProvider.getPublicKey())
@@ -74,18 +73,15 @@ public class PaymentController {
      * the body is unreadable - Paystack retries non-2xx, and we must not turn a
      * duplicate delivery into an error storm.
      */
-    // Dedup by payment reference (unique per charge), never by event type name
-    // like "charge.success" which would block every subsequent payment.
-    @WebhookIdempotent(provider = "paystack", eventIdBodyField = "data.reference")
+    // Dedup by payment reference is done INSIDE PaymentService, after HMAC
+    // verification. An aspect around the controller would claim the Redis key
+    // from attacker-controlled JSON before the signature is even checked.
     @PostMapping("/webhook")
     public ResponseEntity<Map<String, String>> webhook(
             HttpServletRequest request,
-            @RequestBody(required = false) String rawBody,
+            @RequestBody(required = false) byte[] rawBody,
             @RequestHeader(value = "x-paystack-signature", required = false) String signature) {
-        if (rawBody == null) {
-            rawBody = "";
-        }
-        paymentService.handleWebhook(rawBody, signature);
+        paymentService.handleWebhook(rawBody == null ? new byte[0] : rawBody, signature);
         return ResponseEntity.ok(Map.of("status", "received"));
     }
 
@@ -95,7 +91,7 @@ public class PaymentController {
      */
     @GetMapping("/verify")
     public ResponseEntity<PaymentTransactionDto> verify(@RequestParam("reference") String reference) {
-        PaymentTransaction tx = paymentService.verifyAndApply(reference);
+        PaymentTransaction tx = paymentService.verifyAndApply(reference, securityUtil.getCurrentUserId());
         return ResponseEntity.ok(toDto(tx));
     }
 
@@ -117,16 +113,18 @@ public class PaymentController {
     public ResponseEntity<Map<String, Object>> status() {
         return ResponseEntity.ok(Map.of(
                 "configured", paymentService.isConfigured(),
+                "testMode", paymentService.isTestMode(),
                 "packs", PaymentService.CREDIT_PACKS,
-                "currency", "NGN"));
+                "currency", PaymentService.CURRENCY));
     }
 
     private PaymentTransactionDto toDto(PaymentTransaction tx) {
         return PaymentTransactionDto.builder()
                 .id(tx.getId())
+                .userId(tx.getUser().getId())
                 .reference(tx.getReference())
                 .provider(tx.getProvider())
-                .amountKobo(tx.getAmountKobo())
+                .amountCents(tx.getAmountCents())
                 .credits(tx.getCredits())
                 .status(tx.getStatus().name())
                 .checkoutUrl(tx.getCheckoutUrl())

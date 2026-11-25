@@ -4,6 +4,32 @@ Profile `prod` (`SPRING_PROFILES_ACTIVE=prod`). `application-prod.properties` ma
 Render dashboard env vars onto Spring properties - the file itself hardcodes nothing
 secret. Local values stay in `application.properties`.
 
+### Production topology
+
+```mermaid
+flowchart TB
+  Browser[Browser / SPA]
+  Render[Render Web Service<br/>Spring Boot prod profile]
+  SupaDB[(Supabase Postgres<br/>transaction pooler :6543)]
+  Upstash[(Upstash Redis)]
+  SupaStore[(Supabase Storage<br/>private S3 bucket)]
+  Google[Google OAuth]
+  Brevo[Brevo email]
+  Gemini[Gemini AI]
+  Paystack[Paystack]
+
+  Browser -->|HTTPS REST + STOMP /ws| Render
+  Browser -->|authorization code| Google
+  Google -->|redirect + userinfo| Render
+  Render -->|Flyway V1-V18| SupaDB
+  Render -->|cache, rate limits, idempotency| Upstash
+  Render -->|signed downloads| SupaStore
+  Render -->|verification + reset mail| Brevo
+  Render -->|document analysis| Gemini
+  Render -->|initialize + server-side verify| Paystack
+  Paystack -->|HMAC-signed webhook| Render
+```
+
 ## Contents
 
 - [1. Provision backing services](#1-provision-backing-services)
@@ -44,6 +70,7 @@ SPRING_PROFILES_ACTIVE=prod
 DATABASE_URL=jdbc:postgresql://postgres.PROJECTREF:PASSWORD@aws-0-REGION.pooler.supabase.com:6543/postgres?prepareThreshold=0&sslmode=require
 DB_USERNAME=postgres.PROJECTREF
 DB_PASSWORD=<supabase db password>
+DB_POOL_SIZE=4
 REDIS_HOST=<upstash host>
 REDIS_PORT=6379
 REDIS_PASSWORD=<upstash password>
@@ -61,7 +88,28 @@ AWS_S3_ENDPOINT=https://<PROJECTREF>.supabase.co/storage/v1/s3
 GEMINI_API_KEY=<optional>
 BREVO_API_KEY=<optional>
 EMAIL_FROM_ADDRESS=no-reply@yourdomain.com
+PAYSTACK_SECRET_KEY=sk_test_xxx        # or sk_live_xxx when actually going live
+PAYSTACK_PUBLIC_KEY=pk_test_xxx        # or pk_live_xxx to match the secret key
+PAYMENTS_CALLBACK_URL=https://<your-frontend>/payment/callback   # optional; defaults to FRONTEND_URL + /payment/callback
 ```
+
+Paystack is USD end-to-end: packs are 200/800/1600 cents (`$2/$8/$16`), and
+`currency: "USD"` is sent on every initialize/verify call. Enable USD in the
+Paystack dashboard before testing. Use `sk_test_`/`pk_test_` in test mode; never
+mix test and live keys. The secret key also verifies the webhook HMAC, so it is
+required even if the browser uses `/verify`.
+
+In Paystack Dashboard -> Settings -> Webhooks, add:
+
+```
+https://<backend-host>/api/payments/webhook
+```
+
+Events: `charge.success` is the important one. The endpoint is public but
+HMAC-verified; duplicates are safe because dedupe happens only after signature
+verification and server-side re-query. If the webhook is not publicly reachable,
+the returning browser still reconciles through `GET /api/payments/verify`.
+Test card: `4084 0840 8408 4081` (any future expiry, any CVC), test mode only.
 
 ## 4. Google redirect URI (optional but recommended)
 
@@ -73,9 +121,14 @@ which is why the prod file pins `server.forward-headers-strategy=framework`
 
 ## 5. Deploy and verify
 
-1. Deploy; Flyway runs `V1`-`V13` on boot (validate mode - the schema must migrate,
-   never be created by Hibernate).
-2. `GET https://<backend>/actuator/health` -> UP (sub-checks: db, redis, storage).
+1. Deploy; Flyway runs all migrations on boot through `V18` (validate mode - the
+   schema must migrate, never be created by Hibernate). `V16` adds server-side
+   refresh-token rotation; `V17` adds the document optimistic-lock column;
+   `V18` renames the payment amount to USD cents. The
+   migrations are Postgres-specific; the opt-in `FlywayMigrationTest` (see
+   `docs/DEVELOPMENT.md`) validates them against a real Postgres before release.
+2. `GET https://<backend>/actuator/health` -> UP (sub-checks: db, redis, diskSpace), or
+   `GET https://<backend>/api/health` for the richer custom payload (database, redis, disk).
 3. `GET https://<backend>/api/auth/providers` -> `{"google":true}` once the Google
    env vars are set (false until then - frontend hides the button).
 4. Register/login/refresh in the SPA; Google button -> `/auth/callback?status=success`.

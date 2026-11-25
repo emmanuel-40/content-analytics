@@ -16,6 +16,21 @@ linking is HTTP 409 (`AccountLinkingException`).
 - [Subscriptions and credits](#subscriptions-and-credits)
 - [Payments (Paystack, test mode)](#payments-paystack-test-mode)
 - [Ops](#ops)
+- [Swagger / OpenAPI](#swagger--openapi)
+
+## Swagger / OpenAPI
+
+Swagger UI is enabled locally and in all profiles through `springdoc-openapi`.
+
+```text
+http://localhost:8080/swagger-ui.html
+http://localhost:8080/v3/api-docs
+```
+
+The UI has an **Authorize** button backed by a Bearer JWT scheme; paste the
+`accessToken` returned by `POST /api/auth/login`. The spec and UI are public
+(they contain no secrets). `OpenApiConfig` supplies the title, version, contact,
+proprietary license and security scheme.
 
 ## Auth
 
@@ -80,16 +95,17 @@ once). `/verify` reconciles a returning browser through the same verified path.
 
 | Method + path | Auth | Notes |
 |---|---|---|
-| `POST /api/payments/initialize` | cookie | Body `{credits}` -> `{reference, checkoutUrl, amountKobo, credits, publicKey, status}`. Open `checkoutUrl` in Paystack. |
+| `POST /api/payments/initialize` | cookie | Body `{credits}` -> `{reference, checkoutUrl, amountCents, credits, publicKey, status}`. Open `checkoutUrl` in Paystack (USD checkout). |
 | `GET /api/payments/verify?reference=` | cookie | Re-queries Paystack and applies credit on success (same logic as webhook). |
 | `POST /api/payments/webhook` | no (HMAC) | Paystack -> us. Verify `x-paystack-signature`; always `200 {status:received}` unless the body is unreadable. |
 | `GET /api/payments/history` | cookie | Own checkout attempts, newest first. |
-| `GET /api/payments/status` | no | `{configured, packs, currency}` - SPA hides the Buy button while unconfigured (mirrors `/api/auth/providers`). |
+| `GET /api/payments/status` | no | `{configured, testMode, packs, currency}` (`currency: "USD"`, `packs` in cents) - SPA hides the Buy button while unconfigured. |
 
-> Test mode by default: swap in live `PAYSTACK_SECRET_KEY` / `PAYSTACK_PUBLIC_KEY`
-> on Render and flip `app.payments.mode=live` - **no code change**. Locally, test
-> with card `4084 0840 8408 4081`; the webhook needs a public URL (ngrok) or just
-> call `/verify` after paying.
+> Test mode uses `sk_test_...` / `pk_test_...` keys; going live is only a key swap
+> to `sk_live_...` / `pk_live_...` on Render - **no code change**. USD must be
+> enabled on the Paystack integration. Locally, test with card
+> `4084 0840 8408 4081` (any future expiry and CVC); the webhook needs a public
+> URL (ngrok) or the browser can reconcile through `/verify` after paying.
 
 ## Ops
 

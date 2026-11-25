@@ -113,16 +113,16 @@ public class DocumentController {
      *
      * Request body: DocumentSearchFilterDto
      * {
-     *   "fileName": "report",
-     *   "status": "COMPLETED",
-     *   "sentiment": "POSITIVE",
-     *   "topic": "finance",
-     *   "startDate": "2024-01-01T00:00:00",
-     *   "endDate": "2024-12-31T23:59:59",
-     *   "pageNumber": 0,
-     *   "pageSize": 20,
-     *   "sortBy": "createdAt",
-     *   "sortDirection": "DESC"
+     * "fileName": "report",
+     * "status": "COMPLETED",
+     * "sentiment": "POSITIVE",
+     * "topic": "finance",
+     * "startDate": "2024-01-01T00:00:00",
+     * "endDate": "2024-12-31T23:59:59",
+     * "pageNumber": 0,
+     * "pageSize": 20,
+     * "sortBy": "createdAt",
+     * "sortDirection": "DESC"
      * }
      *
      * Response: PaginationResponseDto with filtered results
@@ -184,12 +184,12 @@ public class DocumentController {
      *
      * Response: DocumentStatsDto
      * {
-     *   "totalDocuments": 42,
-     *   "completedDocuments": 38,
-     *   "processingDocuments": 2,
-     *   "failedDocuments": 2,
-     *   "totalWords": 125450,
-     *   "averageWordCount": 2987.38
+     * "totalDocuments": 42,
+     * "completedDocuments": 38,
+     * "processingDocuments": 2,
+     * "failedDocuments": 2,
+     * "totalWords": 125450,
+     * "averageWordCount": 2987.38
      * }
      */
     @GetMapping("/stats/overview")
@@ -214,7 +214,7 @@ public class DocumentController {
      * - documentId: UUID of document to download
      *
      * Response: 200 with the raw file as an attachment, or 404 if the document
-     *           does not exist or is not owned by the caller.
+     * does not exist or is not owned by the caller.
      */
     @GetMapping("/{documentId}/download")
     public ResponseEntity<Resource> downloadDocument(
@@ -315,20 +315,10 @@ public class DocumentController {
         // Get user ID from authentication details (set by JwtAuthenticationFilter)
         Object details = authentication.getDetails();
 
-        if (details instanceof java.util.Map) {
-            @SuppressWarnings("unchecked")
-            java.util.Map<String, Object> detailsMap = (java.util.Map<String, Object>) details;
-
-            // ✅ FIX: Convert String to UUID properly
-            String userIdStr = (String) detailsMap.get("userId");
-
-            if (userIdStr == null) {
-                log.error("User ID not found in authentication details");
-                throw new IllegalStateException("User ID not found in authentication");
-            }
-
+        if (details instanceof java.util.Map<?, ?> detailsMap
+                && detailsMap.get("userId") instanceof String userIdStr) {
             try {
-                return UUID.fromString(userIdStr);  // ← Use UUID.fromString()
+                return UUID.fromString(userIdStr);
             } catch (IllegalArgumentException e) {
                 log.error("Invalid UUID format: {}", userIdStr);
                 throw new IllegalStateException("Invalid user ID format", e);

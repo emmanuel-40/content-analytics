@@ -9,7 +9,7 @@ import lombok.NoArgsConstructor;
 
 /**
  * Start a real-money checkout.
- * 
+ *
  * Only fixed packs are accepted ({@code 10}, {@code 50}, {@code 120}) - the
  * price list lives server-side in {@code PaymentService.CREDIT_PACKS}, so a
  * client can never invent its own price.

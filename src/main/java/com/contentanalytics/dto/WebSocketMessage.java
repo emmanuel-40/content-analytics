@@ -16,15 +16,29 @@ import java.util.UUID;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class WebSocketMessage {
 
+    // Canonical message-type values (also exposed as the public contract).
+    public static final String PROGRESS = "PROGRESS";
+    public static final String PROCESSING_COMPLETED = "PROCESSING_COMPLETED";
+    public static final String PROCESSING_FAILED = "PROCESSING_FAILED";
+    public static final String STATUS = "STATUS";
+
+    // Backwards-compatible aliases used internally.
+    public static final String TYPE_PROGRESS = PROGRESS;
+    public static final String TYPE_PROCESSING_COMPLETED = PROCESSING_COMPLETED;
+    public static final String TYPE_PROCESSING_FAILED = PROCESSING_FAILED;
+    public static final String TYPE_STATUS = STATUS;
+
     // Message metadata
-    private String messageId;
-    private String messageType; // PROGRESS, COMPLETED, FAILED, STATUS
+    private UUID messageId;
+    private String messageType; // PROGRESS, PROCESSING_COMPLETED, PROCESSING_FAILED, STATUS
     private LocalDateTime timestamp;
 
     // Document info
     private UUID documentId;
     private String fileName;
-    private UUID userId;
+
+    /** Spring user-destination id (the JWT user id rendered as a string). */
+    private String userId;
 
     // Progress data
     private Float progress; // 0-100%

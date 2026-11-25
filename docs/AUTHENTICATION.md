@@ -7,6 +7,7 @@ cookie jar knows or cares which one was used.
 ## Contents
 
 - [Password flow](#password-flow)
+  - [Refresh rotation and replay detection](#refresh-rotation-and-replay-detection)
 - [Google sign-in flow](#google-sign-in-flow)
 - [Cookies and CSRF](#cookies-and-csrf)
 - [Frontend contract (`/auth/callback`)](#frontend-contract-authcallback)
@@ -23,9 +24,13 @@ cookie jar knows or cares which one was used.
 3. `POST /api/auth/login` checks the flag, then the bcrypt hash, then mints
    access (15 min) + refresh (7 days) JWTs into HttpOnly cookies via
    `AuthService.generateTokenResponse` (shared with OAuth through `issueTokens`).
-4. `POST /api/auth/refresh` rotates the pair (token version is bumped on
-   password change, which invalidates old refresh tokens).
-5. `POST /api/auth/logout` clears both cookies.
+4. `POST /api/auth/refresh` presents a refresh JWT whose SHA-256 hash is checked
+   against the `refresh_tokens` table with a single conditional `UPDATE`. Only
+   one concurrent caller can claim it; presenting a used/revoked token revokes
+   the entire token family and bumps `users.token_version`. Both access and
+   refresh JWTs carry that version, so the filter rejects stale tokens.
+5. `POST /api/auth/logout` clears both cookies and revokes the presented token,
+   every refresh token for the user, and all currently issued access tokens.
 6. `POST /api/auth/forgot-password` / `POST /api/auth/reset-password` add a password
    to any account - including a Google-only one, which is how a Google user
    gains password login later.
@@ -34,24 +39,62 @@ A `LOCAL` row whose password is missing is rejected at login with a message
 telling the user to use Google sign-in or reset their password - bcrypt would
 otherwise just say invalid credentials, which is not actionable.
 
+### Refresh rotation and replay detection
+
+```mermaid
+sequenceDiagram
+  participant SPA
+  participant API as AuthService
+  participant DB as users + refresh_tokens
+
+  SPA->>API: POST /api/auth/refresh (refresh cookie)
+  API->>API: validate JWT signature, type=refresh, claims
+  API->>DB: SELECT row by SHA-256 token_hash
+  alt row missing / expired / used / version mismatch
+    API->>DB: REQUIRES_NEW revoke all sessions + bump token_version
+    API-->>SPA: 401 -> re-login required
+  else row ACTIVE
+    API->>DB: conditional UPDATE (ACTIVE -> USED, set replaced_by)
+    alt one row claimed
+      API->>DB: INSERT successor row (same family_id)
+      API-->>SPA: new access + refresh cookies
+    else zero rows (concurrent reuse)
+      API->>DB: REQUIRES_NEW revoke family + bump token_version
+      API-->>SPA: 401 -> reuse detected
+    end
+  end
+```
+
+Every API request then runs `TokenSessionValidator`: it compares the
+`tokenVersion` claim with `users.token_version` and requires `status = ACTIVE`.
+WebSocket `CONNECT` frames go through the same validator, so a logged-out user
+cannot keep streaming progress over an old signed token.
+
 ## Google sign-in flow
 
 Spring Security owns the OAuth plumbing; we only supply what happens before
 (provisioning) and after (cookies + redirect).
 
-```
-Browser -> GET /oauth2/authorization/google
-  -> 302 Google consent screen (Spring-built URL; state + nonce stored
-      in a short-lived session for the ~2 seconds of the redirect)
-User consents
-  -> GET /login/oauth2/code/google?code=...&state=...   (Google redirects here)
-  -> Spring validates state/nonce, swaps code for tokens, GETs userinfo
-  -> GoogleOAuth2UserService: requires email_verified=true,
-     then OAuthAccountProvisioner maps the Google sub onto a users row
-  -> OAuth2LoginSuccessHandler: AuthService.issueTokens(user), set both
-     HttpOnly cookies, 302 <FRONTEND_URL>/auth/callback?status=success
-  -> (any failure) OAuth2LoginFailureHandler:
-     302 <FRONTEND_URL>/auth/callback?status=error&reason=<code>
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant API as Backend (Spring Security)
+  participant G as Google Accounts
+  participant DB as PostgreSQL
+  participant SPA as Frontend SPA
+
+  B->>API: GET /oauth2/authorization/google
+  API-->>B: 302 consent screen (state + nonce in short-lived handshake session)
+  B->>G: approve openid / email / profile
+  G-->>B: 302 /login/oauth2/code/google?code&state
+  B->>API: callback with code + state
+  API->>API: validate state and nonce
+  API->>G: exchange code for tokens, fetch userinfo
+  G-->>API: id_token + email (requires email_verified=true)
+  API->>DB: provision: find by sub, link by verified email, or create passwordless row
+  API->>API: OAuth2LoginSuccessHandler -> issueTokens + both HttpOnly cookies
+  API-->>B: 302 FRONTEND_URL/auth/callback?status=success
+  Note over API,SPA: any failure -> 302 ...?status=error&reason=CODE
 ```
 
 `SessionCreationPolicy.STATELESS` is NOT contradicted by the handshake session:

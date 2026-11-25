@@ -8,16 +8,18 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Paystack (https://paystack.com) - cards, bank transfer, USSD, mobile money.
- * 
+ *
  * Test mode uses {@code sk_test_...} keys and the fake card
  * {@code 4084 0840 8408 4081}: the whole flow runs end to end with zero real
  * money moving. Going live is a key swap on the Render dashboard only
  * ({@code PAYSTACK_SECRET_KEY} / {@code PAYSTACK_PUBLIC_KEY}) - no code change.
- * 
+ *
  * Security posture: the browser callback URL is UX only. Credits move only
  * after (1) HMAC verification of the webhook and (2) a server-side
  * {@code GET /transaction/verify} confirming {@code status=success} for the
@@ -35,7 +37,13 @@ public class PaystackProvider implements PaymentProvider {
     @Value("${app.payments.paystack.public-key:}")
     private String publicKey;
 
-    private final OkHttpClient httpClient = new OkHttpClient();
+    /** Explicit timeouts: a slow provider must never hold a DB connection hostage. */
+    private final OkHttpClient httpClient = new OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(15, TimeUnit.SECONDS)
+            .build();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
@@ -44,13 +52,14 @@ public class PaystackProvider implements PaymentProvider {
     }
 
     @Override
-    public InitializeResult initialize(String email, int amountKobo, String reference, String callbackUrl) {
+    public InitializeResult initialize(String email, int amountCents, String reference, String callbackUrl) {
         requireConfigured();
 
         try {
             String json = objectMapper.writeValueAsString(Map.of(
                     "email", email,
-                    "amount", amountKobo,
+                    "amount", amountCents,
+                    "currency", "USD",
                     "reference", reference,
                     "callback_url", callbackUrl));
 
@@ -90,12 +99,24 @@ public class PaystackProvider implements PaymentProvider {
 
             try (Response response = httpClient.newCall(request).execute()) {
                 String body = response.body() != null ? response.body().string() : "";
+                if (response.code() >= 500) {
+                    // Provider-side failure: throw so the call is retried and the
+                    // transaction stays PENDING. Never mark a paid charge FAILED
+                    // because Paystack had a bad five minutes.
+                    log.error("Paystack verify unavailable for {}: HTTP {}", reference, response.code());
+                    throw new IllegalStateException("Payment provider unavailable (" + response.code() + ")");
+                }
                 if (!response.isSuccessful()) {
+                    // 4xx means the reference itself was rejected/unknown.
                     log.warn("Paystack verify rejected reference {}: {}", reference, response.code());
                     return new VerifyResult(false, 0, null);
                 }
                 JsonNode data = objectMapper.readTree(body).path("data");
-                boolean paid = "success".equalsIgnoreCase(data.path("status").asText());
+                // The checkout is opened in USD; refuse to credit a charge that
+                // Paystack settled in another currency even if status says success.
+                boolean currencyOk = data.hasNonNull("currency")
+                        && "USD".equalsIgnoreCase(data.path("currency").asText());
+                boolean paid = "success".equalsIgnoreCase(data.path("status").asText()) && currencyOk;
                 return new VerifyResult(paid, data.path("amount").asInt(0),
                         data.path("paid_at").asText(null));
             }
@@ -106,15 +127,15 @@ public class PaystackProvider implements PaymentProvider {
     }
 
     @Override
-    public boolean verifyWebhookSignature(String rawBody, String signature) {
-        if (secretKey == null || secretKey.isBlank() || signature == null) {
+    public boolean verifyWebhookSignature(byte[] rawBody, String signature) {
+        if (secretKey == null || secretKey.isBlank() || signature == null || rawBody == null) {
             return false;
         }
         try {
             javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA512");
             mac.init(new javax.crypto.spec.SecretKeySpec(
-                    secretKey.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA512"));
-            byte[] digest = mac.doFinal(rawBody.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    secretKey.getBytes(StandardCharsets.UTF_8), "HmacSHA512"));
+            byte[] digest = mac.doFinal(rawBody);
             StringBuilder hex = new StringBuilder(digest.length * 2);
             for (byte b : digest) { hex.append(String.format("%02x", b)); }
             return constantTimeEquals(hex.toString(), signature.trim().toLowerCase());
@@ -125,12 +146,11 @@ public class PaystackProvider implements PaymentProvider {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public java.util.Optional<String> extractReference(java.util.Map<String, Object> payload) {
         if (!"charge.success".equals(payload.get("event"))) { return java.util.Optional.empty(); }
         Object data = payload.get("data");
         if (data instanceof java.util.Map<?, ?> dataMap) {
-            Object ref = ((java.util.Map<String, Object>) dataMap).get("reference");
+            Object ref = dataMap.get("reference");
             if (ref != null && !ref.toString().isBlank()) { return java.util.Optional.of(ref.toString()); }
         }
         return java.util.Optional.empty();
@@ -142,6 +162,12 @@ public class PaystackProvider implements PaymentProvider {
     /** False while no secret key is configured - the SPA hides Buy until then. */
     public boolean isConfigured() {
         return secretKey != null && !secretKey.isBlank();
+    }
+
+    /** Test keys start with {@code sk_test_}; live keys with {@code sk_live_}. */
+    @Override
+    public boolean isTestMode() {
+        return secretKey != null && secretKey.startsWith("sk_test_");
     }
 
     private void requireConfigured() {

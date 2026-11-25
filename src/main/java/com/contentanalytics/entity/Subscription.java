@@ -10,7 +10,7 @@ import java.util.UUID;
 
 /**
  * A user's subscription tier and their credit allowance for the current period.
- * 
+ *
  * One row per user ({@code user_id} is unique). Purchased credits that exceed the monthly
  * allowance are tracked separately in {@link #purchasedCredits}, so rolling the period over
  * never destroys money the user paid for.
@@ -35,6 +35,7 @@ public class Subscription {
 
     @Version
     @Column(name = "version", nullable = false)
+    @Builder.Default
     private Long version = 0L;
 
     @OneToOne(fetch = FetchType.LAZY, optional = false)
@@ -87,7 +88,7 @@ public class Subscription {
 
     /**
      * @return credits still available this period (monthly allowance minus usage,
-     *         plus any purchased credits).
+     * plus any purchased credits).
      */
     public int getAvailableCredits() {
         int monthlyRemaining = Math.max(0, monthlyCreditAllowance - creditsUsedThisPeriod);
@@ -96,13 +97,13 @@ public class Subscription {
 
     /**
      * Roll the billing period forward, resetting the monthly allowance.
-     * 
+     *
      * {@code purchasedCredits} are intentionally preserved.
      *
      * @param now the current instant, passed in by the caller rather than read
-     *            from the system clock here. Injecting the time source keeps this
-     *            deterministic in tests (a fixed {@link java.time.Clock} can be supplied)
-     *            and guarantees {@code periodStart}/{@code periodEnd} come from one instant.
+     * from the system clock here. Injecting the time source keeps this
+     * deterministic in tests (a fixed {@link java.time.Clock} can be supplied)
+     * and guarantees {@code periodStart}/{@code periodEnd} come from one instant.
      */
     public void rollPeriod(int newAllowance, LocalDateTime now) {
         this.monthlyCreditAllowance = newAllowance;

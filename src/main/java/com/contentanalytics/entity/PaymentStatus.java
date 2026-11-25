@@ -2,8 +2,8 @@ package com.contentanalytics.entity;
 
 /**
  * Lifecycle of a checkout attempt.
- * 
- * The only legal transition that grants credits is PENDING -&gt; SUCCESS, and it
+ *
+ * The only legal transition that grants credits is PENDING  to  SUCCESS, and it
  * may only be performed by the webhook handler after the provider confirms the
  * charge server-side. The frontend callback can never move a row to SUCCESS.
  */

@@ -7,6 +7,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -27,12 +29,12 @@ public class WebSocketService {
         log.debug("Sending progress update to user: {} for document: {}", userId, documentId);
 
         WebSocketMessage message = WebSocketMessage.builder()
-                .messageId(UUID.randomUUID().toString())
-                .messageType("PROGRESS")
+                .messageId(UUID.randomUUID())
+                .messageType(WebSocketMessage.TYPE_PROGRESS)
                 .timestamp(LocalDateTime.now())
                 .documentId(documentId)
                 .fileName(fileName)
-                .userId(userId)
+                .userId(userId.toString())
                 .progress(progress)
                 .status(status)
                 .processingStage(processingStage)
@@ -55,12 +57,12 @@ public class WebSocketService {
         log.info("Sending completion update to user: {} for document: {}", userId, documentId);
 
         WebSocketMessage message = WebSocketMessage.builder()
-                .messageId(UUID.randomUUID().toString())
-                .messageType("COMPLETED")
+                .messageId(UUID.randomUUID())
+                .messageType(WebSocketMessage.TYPE_PROCESSING_COMPLETED)
                 .timestamp(LocalDateTime.now())
                 .documentId(documentId)
                 .fileName(fileName)
-                .userId(userId)
+                .userId(userId.toString())
                 .progress(100f)
                 .status("COMPLETED")
                 .summary(summary)
@@ -71,12 +73,11 @@ public class WebSocketService {
                 .processingTimeMs(processingTimeMs)
                 .build();
 
-        // Send to user's private queue
-        messagingTemplate.convertAndSendToUser(
-                String.valueOf(userId),
+        sendAfterCommit(() -> messagingTemplate.convertAndSendToUser(
+                userId.toString(),
                 "/queue/documents",
                 message
-        );
+        ));
     }
 
     /**
@@ -87,24 +88,41 @@ public class WebSocketService {
         log.error("Sending failure update to user: {} for document: {}", userId, documentId);
 
         WebSocketMessage message = WebSocketMessage.builder()
-                .messageId(UUID.randomUUID().toString())
-                .messageType("FAILED")
+                .messageId(UUID.randomUUID())
+                .messageType(WebSocketMessage.TYPE_PROCESSING_FAILED)
                 .timestamp(LocalDateTime.now())
                 .documentId(documentId)
                 .fileName(fileName)
-                .userId(userId)
+                .userId(userId.toString())
                 .progress(0f)
                 .status("FAILED")
                 .errorMessage(errorMessage)
                 .errorCode(errorCode)
                 .build();
 
-        // Send to user's private queue
-        messagingTemplate.convertAndSendToUser(
-                String.valueOf(userId),
+        sendAfterCommit(() -> messagingTemplate.convertAndSendToUser(
+                userId.toString(),
                 "/queue/documents",
                 message
-        );
+        ));
+    }
+
+    /**
+     * Terminal notifications must never race the transaction that persists their status.
+     * Deferring to afterCommit guarantees "status update, then notification" ordering;
+     * when there is no transaction (e.g. a direct unit test call) send immediately.
+     */
+    private void sendAfterCommit(Runnable send) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    send.run();
+                }
+            });
+        } else {
+            send.run();
+        }
     }
 
     /**

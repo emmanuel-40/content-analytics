@@ -8,7 +8,7 @@ import java.util.List;
 
 /**
  * Selects the configured {@link AiProvider} and degrades gracefully when none is usable.
- * 
+ *
  * Adding a new vendor means implementing {@link AiProvider} and adding it to the provider
  * list - no changes to callers. When the selected provider has no API key or errors, the
  * caller receives {@code null} and the document still completes with basic analysis.
@@ -46,7 +46,7 @@ public class AiAnalysisService {
      * Run analysis through the configured provider.
      *
      * @return the analysis, or {@code null} when AI is unavailable or the call failed.
-     *         Callers must treat {@code null} as "continue with basic analysis".
+     * Callers must treat {@code null} as "continue with basic analysis".
      */
     public DocumentAnalysisResult analyze(String documentText) {
         AiProvider provider = resolveProvider();
@@ -77,7 +77,7 @@ public class AiAnalysisService {
 
     /**
      * Resolve the configured provider.
-     * 
+     *
      * Deliberately does NOT silently switch to a different vendor: if an operator explicitly
      * configured a provider and it has no credentials, the correct behaviour is to report that
      * AI is unavailable rather than quietly sending document content to another vendor.

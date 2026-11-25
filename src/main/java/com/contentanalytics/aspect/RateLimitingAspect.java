@@ -21,7 +21,7 @@ import java.util.Map;
 /**
  * Aspect for {@link RateLimited}-annotated controller methods.
  *
- * Enforces a Redis-backed sliding-window limit per client IP (or per
+ * Enforces a Redis-backed atomic fixed-window limit per client IP (or per
  * authenticated user when {@code perUser} is true). Returns 429 Too Many
  * Requests when the limit is exceeded.
  */
@@ -46,7 +46,7 @@ public class RateLimitingAspect {
 
         String key;
         if (rateLimited.perUser()) {
-            // Prefer authenticated principal — never trust a client-supplied X-User-Id
+            // Prefer authenticated principal - never trust a client-supplied X-User-Id
             String userId = resolveAuthenticatedUserId();
             if (userId == null || userId.isBlank()) {
                 userId = "ip:" + getClientIp(request);

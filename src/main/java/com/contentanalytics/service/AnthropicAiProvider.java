@@ -1,5 +1,6 @@
 package com.contentanalytics.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
@@ -14,7 +15,7 @@ import java.util.regex.Pattern;
 
 /**
  * Anthropic Claude implementation of {@link AiProvider}.
- * 
+ *
  * Kept as an alternative backend. Claude has no free tier, so it is only selected when
  * {@code app.ai.provider=anthropic} and an API key is supplied.
  */
@@ -81,17 +82,17 @@ public class AnthropicAiProvider implements AiProvider {
 
         return """
             You are a document analysis expert. Analyze the following document and provide:
-            
+
             1. A concise summary (2-3 paragraphs)
             2. Key topics (comma-separated list)
             3. Sentiment analysis (POSITIVE, NEUTRAL, or NEGATIVE)
             4. Confidence score (0.0-1.0)
-            
+
             Document:
             ---
             """ + truncatedText + """
             ---
-            
+
             Provide your response in the following JSON format:
             {
               "summary": "...",
@@ -99,7 +100,7 @@ public class AnthropicAiProvider implements AiProvider {
               "sentiment": "NEUTRAL",
               "confidenceScore": 0.85
             }
-            
+
             Respond ONLY with valid JSON, no additional text.
             """;
     }
@@ -148,17 +149,16 @@ public class AnthropicAiProvider implements AiProvider {
     }
 
     private String extractTextFromResponse(String responseJson) throws IOException {
-
-        Map<String, Object> response = objectMapper.readValue(responseJson, Map.class);
-
-        List<Map<String, Object>> content =
-                (List<Map<String, Object>>) response.get("content");
-
-        if (content == null || content.isEmpty()) {
+        JsonNode content = objectMapper.readTree(responseJson).path("content");
+        if (!content.isArray() || content.isEmpty()) {
             throw new RuntimeException("No content in Claude API response");
         }
 
-        return (String) content.get(0).get("text");
+        JsonNode text = content.get(0).path("text");
+        if (text.isMissingNode() || text.isNull() || text.asText().isBlank()) {
+            throw new RuntimeException("No text in Claude API response");
+        }
+        return text.asText();
     }
 
     private DocumentAnalysisResult parseAnalysisResponse(String response) {
@@ -166,7 +166,6 @@ public class AnthropicAiProvider implements AiProvider {
         try {
             String jsonContent = response;
 
-            // FIX 3: safer JSON extraction
             Pattern pattern = Pattern.compile("\\{.*\\}", Pattern.DOTALL);
             Matcher matcher = pattern.matcher(response);
 
@@ -174,18 +173,14 @@ public class AnthropicAiProvider implements AiProvider {
                 jsonContent = matcher.group();
             }
 
-            Map<String, Object> parsed = objectMapper.readValue(jsonContent, Map.class);
-
-            Object score = parsed.get("confidenceScore");
-
-            float confidence = score != null
-                    ? ((Number) score).floatValue()
-                    : 0f;
+            JsonNode parsed = objectMapper.readTree(jsonContent);
+            JsonNode score = parsed.path("confidenceScore");
+            float confidence = score.isNumber() ? score.floatValue() : 0f;
 
             return DocumentAnalysisResult.builder()
-                    .summary((String) parsed.get("summary"))
-                    .keyTopics((String) parsed.get("keyTopics"))
-                    .sentiment((String) parsed.get("sentiment"))
+                    .summary(textOrNull(parsed, "summary"))
+                    .keyTopics(textOrNull(parsed, "keyTopics"))
+                    .sentiment(textOrNull(parsed, "sentiment"))
                     .confidenceScore(confidence)
                     .build();
 
@@ -199,5 +194,11 @@ public class AnthropicAiProvider implements AiProvider {
                     .confidenceScore(0f)
                     .build();
         }
+    }
+
+    /** Returns a text field, or null when it is missing or explicitly null. */
+    private String textOrNull(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isMissingNode() || value.isNull() ? null : value.asText();
     }
 }

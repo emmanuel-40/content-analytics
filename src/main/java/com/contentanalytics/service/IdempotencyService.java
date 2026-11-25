@@ -31,24 +31,39 @@ public class IdempotencyService {
      * Attempt to execute an idempotent operation.
      *
      * If a cached response exists for {@code key}, it is returned and {@code operation}
-     * is <b>not</b> invoked. Otherwise {@code operation} is invoked, its result is
+     * is not invoked. Otherwise {@code operation} is invoked, its result is
      * cached, and returned.
      *
      * @param key          idempotency key from the {@code Idempotency-Key} header
      * @param endpoint     logical endpoint name, used as a Redis key namespace
      * @param ttlHours     how long to cache the response
      * @param operation    the actual business logic; returns a {@code CachedResponse}
-     * @param <T>          cached response type
+     * @param T          cached response type
      * @return the cached or freshly computed response
      */
     public <T> CachedResponse<T> execute(
             String key, String endpoint, long ttlHours,
             IdempotencyOperation<T> operation) {
+        return execute(key, endpoint, null, ttlHours, operation);
+    }
 
-        String redisKey = IDEMPOTENCY_PREFIX + endpoint + ":" + key;
+    /**
+     * Same as {@link #execute(String, String, long, IdempotencyOperation)} but
+     * namespaces the key with a caller-supplied scope (authenticated user id +
+     * request-body fingerprint). Without a scope, two users sharing a client-
+     * chosen key would share one cached response.
+     */
+    public <T> CachedResponse<T> execute(
+            String key, String endpoint, String scope, long ttlHours,
+            IdempotencyOperation<T> operation) {
 
-        // 1. Check cache first
-        String cached = redis.opsForValue().get(redisKey);
+        String redisKey = IDEMPOTENCY_PREFIX + endpoint
+                + (scope == null || scope.isBlank() ? "" : ":" + scope)
+                + ":" + key;
+
+        // 1. Check cache first. Redis is an optimisation; a Redis outage must
+        // not block checkout because unique DB references are the real guard.
+        String cached = readCached(redisKey);
         if (cached != null && !cached.isBlank()) {
             try {
                 CachedResponse<T> hit = objectMapper.readValue(cached,
@@ -64,8 +79,15 @@ public class IdempotencyService {
         }
 
         // 2. Not cached — claim with SET NX so only one caller executes.
-        Boolean set = redis.opsForValue().setIfAbsent(redisKey, "__PENDING__",
-                Duration.ofHours(ttlHours));
+        Boolean set;
+        try {
+            set = redis.opsForValue().setIfAbsent(redisKey, "__PENDING__",
+                    Duration.ofHours(ttlHours));
+        } catch (RuntimeException e) {
+            log.warn("Idempotency store unavailable for key {} - executing without a Redis claim: {}",
+                    key, e.getMessage());
+            set = Boolean.TRUE;
+        }
         if (Boolean.FALSE.equals(set)) {
             // Another request owns this key; poll briefly for the cached response
             for (int i = 0; i < 20; i++) {
@@ -75,7 +97,7 @@ public class IdempotencyService {
                     Thread.currentThread().interrupt();
                     break;
                 }
-                cached = redis.opsForValue().get(redisKey);
+                cached = readCached(redisKey);
                 if (cached != null && !"__PENDING__".equals(cached) && !cached.isBlank()) {
                     try {
                         CachedResponse<T> hit = objectMapper.readValue(cached,
@@ -98,24 +120,55 @@ public class IdempotencyService {
                     "A request with this Idempotency-Key is already in progress; retry shortly");
         }
 
-        // 3. Execute the operation
-        CachedResponse<T> result = operation.execute();
+        // 3. Execute the operation. Release the claim on ANY failure so a
+        // transient provider outage cannot lock the key for the full TTL.
+        CachedResponse<T> result;
+        try {
+            result = operation.execute();
+        } catch (RuntimeException e) {
+            try {
+                redis.delete(redisKey);
+            } catch (RuntimeException cleanupFailure) {
+                log.warn("Could not release idempotency claim {}: {}", redisKey,
+                        cleanupFailure.getMessage());
+            }
+            throw e;
+        }
 
-        // 4. Cache the result (overwrite the __PENDING__ placeholder)
+        // 4. Cache the result (overwrite the __PENDING__ placeholder).
+        // If caching fails we drop the claim rather than leaving a poisoned
+        // __PENDING__ marker; the underlying business operations enforce their
+        // own DB-level idempotency (unique payment/credit references).
         try {
             String json = objectMapper.writeValueAsString(result);
             redis.opsForValue().set(redisKey, json, Duration.ofHours(ttlHours));
         } catch (Exception e) {
-            log.error("Failed to cache idempotency response for key {}: {}", key, e.getMessage());
+            log.error("Failed to cache idempotency response for key {} - releasing claim: {}",
+                    key, e.getMessage());
+            try {
+                redis.delete(redisKey);
+            } catch (RuntimeException cleanupFailure) {
+                log.warn("Could not release idempotency claim {}: {}", redisKey,
+                        cleanupFailure.getMessage());
+            }
         }
 
         return result;
     }
 
+    private String readCached(String redisKey) {
+        try {
+            return redis.opsForValue().get(redisKey);
+        } catch (RuntimeException e) {
+            log.warn("Could not read idempotency cache {}: {}", redisKey, e.getMessage());
+            return null;
+        }
+    }
+
     /**
      * Result of an idempotent operation, serializable to JSON for Redis caching.
      *
-     * @param <T> the response body type
+     * @param T the response body type
      */
     public record CachedResponse<T>(
             int status,
@@ -132,7 +185,7 @@ public class IdempotencyService {
     /**
      * Callback executed when no cached response exists for the idempotency key.
      *
-     * @param <T> the response body type
+     * @param T the response body type
      */
     @FunctionalInterface
     public interface IdempotencyOperation<T> {

@@ -1,5 +1,6 @@
 package com.contentanalytics.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
@@ -14,7 +15,7 @@ import java.util.regex.Pattern;
 
 /**
  * Google Gemini implementation of {@link AiProvider}.
- * 
+ *
  * Uses the free tier of the Gemini API. If no API key is configured the provider reports
  * itself unavailable and {@link AiAnalysisService} degrades gracefully to basic analysis
  * rather than failing the document.
@@ -136,29 +137,25 @@ public class GeminiService implements AiProvider {
     /**
      * Gemini wraps the response in candidates[].content.parts[].text.
      */
-    @SuppressWarnings("unchecked")
     private String extractText(String responseJson) throws java.io.IOException {
-        Map<String, Object> parsed = objectMapper.readValue(responseJson, Map.class);
-
-        List<Map<String, Object>> candidates = (List<Map<String, Object>>) parsed.get("candidates");
-        if (candidates == null || candidates.isEmpty()) {
+        JsonNode root = objectMapper.readTree(responseJson);
+        JsonNode candidates = root.path("candidates");
+        if (!candidates.isArray() || candidates.isEmpty()) {
             throw new IllegalStateException("No candidates in Gemini response");
         }
 
-        Map<String, Object> content = (Map<String, Object>) candidates.get(0).get("content");
-        if (content == null) {
-            throw new IllegalStateException("No content in Gemini response");
-        }
-
-        List<Map<String, Object>> parts = (List<Map<String, Object>>) content.get("parts");
-        if (parts == null || parts.isEmpty()) {
+        JsonNode parts = candidates.get(0).path("content").path("parts");
+        if (!parts.isArray() || parts.isEmpty()) {
             throw new IllegalStateException("No parts in Gemini response");
         }
 
-        return (String) parts.get(0).get("text");
+        JsonNode text = parts.get(0).path("text");
+        if (text.isMissingNode() || text.isNull() || text.asText().isBlank()) {
+            throw new IllegalStateException("No text in Gemini response");
+        }
+        return text.asText();
     }
 
-    @SuppressWarnings("unchecked")
     private DocumentAnalysisResult parseResponse(String response) {
         // Models often wrap JSON in prose or markdown fences; extract the first {...} block.
         String jsonContent = response;
@@ -168,15 +165,14 @@ public class GeminiService implements AiProvider {
         }
 
         try {
-            Map<String, Object> parsed = objectMapper.readValue(jsonContent, Map.class);
-
-            Object score = parsed.get("confidenceScore");
-            float confidence = score instanceof Number number ? number.floatValue() : 0f;
+            JsonNode parsed = objectMapper.readTree(jsonContent);
+            JsonNode score = parsed.path("confidenceScore");
+            float confidence = score.isNumber() ? score.floatValue() : 0f;
 
             return DocumentAnalysisResult.builder()
-                    .summary((String) parsed.get("summary"))
-                    .keyTopics((String) parsed.get("keyTopics"))
-                    .sentiment(normalizeSentiment((String) parsed.get("sentiment")))
+                    .summary(textOrNull(parsed, "summary"))
+                    .keyTopics(textOrNull(parsed, "keyTopics"))
+                    .sentiment(normalizeSentiment(textOrNull(parsed, "sentiment")))
                     .confidenceScore(confidence)
                     .build();
 
@@ -184,6 +180,12 @@ public class GeminiService implements AiProvider {
             log.error("Could not parse Gemini response as JSON: {}", e.getMessage());
             return null;
         }
+    }
+
+    /** Returns a text field, or null when it is missing or explicitly null. */
+    private String textOrNull(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isMissingNode() || value.isNull() ? null : value.asText();
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.contentanalytics.service;
 
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,6 +11,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -30,11 +32,72 @@ public class StorageService {
     private final Optional<S3StorageService> s3StorageService;  // ← OPTIONAL (not required)
 
     /**
+     * Select the backend once, with a clear configuration error for unsupported values.
+     * {@code supabase} is production's name for the same S3-compatible API the SDK speaks;
+     * it is accepted as an alias for {@code s3}.
+     */
+    private boolean useS3() {
+        String type = storageType == null ? "local" : storageType.trim().toLowerCase(Locale.ROOT);
+        return switch (type) {
+            case "local" -> false;
+            case "s3", "supabase" -> true;
+            default -> throw new IllegalStateException(
+                    "Unsupported app.storage.type '" + storageType
+                            + "'. Supported values: local, s3, supabase (S3-compatible)");
+        };
+    }
+
+    private S3StorageService s3Storage() {
+        return s3StorageService.orElseThrow(() -> new IllegalStateException(
+                "app.storage.type=" + storageType + " requires S3StorageService; "
+                        + "check the app.storage.type and S3 credentials configuration"));
+    }
+
+    /** Fail at startup for an unsupported backend rather than on the first file operation. */
+    @PostConstruct
+    void validateStorageType() {
+        useS3();
+    }
+
+    /**
+     * Read an object's bytes through the active backend. Used by text extraction so the
+     * worker never assumes documents live on the local filesystem.
+     */
+    public byte[] loadFileBytes(String fileKey) {
+        if (useS3()) {
+            try {
+                return s3Storage().loadFileAsResource(fileKey).getContentAsByteArray();
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to read stored file: " + fileKey, e);
+            }
+        }
+        try {
+            return Files.readAllBytes(resolveLocalPath(fileKey));
+        } catch (IOException e) {
+            log.error("Error reading file locally for key {}", fileKey, e);
+            throw new RuntimeException("Failed to read file", e);
+        }
+    }
+
+    /**
+     * Resolve a key inside the configured local root, rejecting traversal attempts.
+     */
+    private Path resolveLocalPath(String fileKey) {
+        Path root = Paths.get(localStoragePath).toAbsolutePath().normalize();
+        Path filePath = Paths.get(localStoragePath, fileKey).normalize();
+        if (!filePath.toAbsolutePath().normalize().startsWith(root)) {
+            log.error("Rejected path traversal attempt for file key: {}", fileKey);
+            throw new IllegalArgumentException("Invalid file key");
+        }
+        return filePath;
+    }
+
+    /**
      * Save file to storage (local or S3)
      */
     public String saveFile(MultipartFile file, UUID userId) {
-        if ("s3".equalsIgnoreCase(storageType)) {
-            return s3StorageService.get().uploadFile(file, userId);
+        if (useS3()) {
+            return s3Storage().uploadFile(file, userId);
         } else {
             return saveFileLocally(file, userId);
         }
@@ -44,8 +107,8 @@ public class StorageService {
      * Delete file from storage
      */
     public void deleteFile(String fileKey) {
-        if ("s3".equalsIgnoreCase(storageType)) {
-            s3StorageService.get().deleteFile(fileKey);
+        if (useS3()) {
+            s3Storage().deleteFile(fileKey);
         } else {
             deleteFileLocally(fileKey);
         }
@@ -53,13 +116,13 @@ public class StorageService {
 
     /**
      * Generate a short-lived signed URL for a stored object.
-     * 
+     *
      * Used so a private bucket never has to be made public: the client receives a temporary
      * link instead of a permanent one.
      */
     public String generatePresignedUrl(String fileKey, java.time.Duration duration) {
-        if ("s3".equalsIgnoreCase(storageType)) {
-            return s3StorageService.get().generatePresignedUrl(fileKey, duration);
+        if (useS3()) {
+            return s3Storage().generatePresignedUrl(fileKey, duration);
         }
         // Local files are served through the authenticated download endpoint, so no URL is needed.
         return null;
@@ -67,7 +130,7 @@ public class StorageService {
 
     /**
      * Persist raw bytes under an explicitly-chosen key.
-     * 
+     *
      * The image pipeline mints its own deterministic keys
      * ({@code profile-{userId}-{size}-{timestamp}.jpg}) because those exact strings are what
      * gets stored in the {@code profile_pictures} columns and later turned into signed URLs.
@@ -75,8 +138,8 @@ public class StorageService {
      * there.
      */
     public String saveBytes(String fileKey, byte[] bytes, String contentType) {
-        if ("s3".equalsIgnoreCase(storageType)) {
-            return s3StorageService.get().uploadBytes(fileKey, bytes, contentType);
+        if (useS3()) {
+            return s3Storage().uploadBytes(fileKey, bytes, contentType);
         }
         saveBytesLocally(fileKey, bytes);
         return fileKey;
@@ -86,13 +149,7 @@ public class StorageService {
      * Write bytes under {@code fileKey}, refusing anything that escapes the storage root.
      */
     private void saveBytesLocally(String fileKey, byte[] bytes) {
-        Path root = Paths.get(localStoragePath).toAbsolutePath().normalize();
-        Path filePath = Paths.get(localStoragePath, fileKey).normalize();
-
-        if (!filePath.toAbsolutePath().normalize().startsWith(root)) {
-            log.error("Rejected path traversal attempt for file key: {}", fileKey);
-            throw new IllegalArgumentException("Invalid file key");
-        }
+        Path filePath = resolveLocalPath(fileKey);
 
         try {
             Files.createDirectories(filePath.getParent());
@@ -105,14 +162,12 @@ public class StorageService {
     }
 
     /**
-     * Get file download URL
-     *
-     * @deprecated only meaningful for a public bucket; prefer the authenticated download endpoint
+     * Legacy direct URL helper. Only meaningful for local storage or a public bucket;
+     * production document downloads use the authenticated streaming endpoint.
      */
-    @Deprecated
     public String getFileUrl(String fileKey) {
-        if ("s3".equalsIgnoreCase(storageType)) {
-            return s3StorageService.get().getFileUrl(fileKey);
+        if (useS3()) {
+            return s3Storage().getFileUrl(fileKey);
         } else {
             return localBaseUrl + "/" + fileKey;
         }
@@ -120,25 +175,16 @@ public class StorageService {
 
     /**
      * Load a stored file as a Spring {@link Resource} for streaming back to a client.
-     * 
+     *
      * S3 keys are fetched into memory (bounded by the configured upload cap); local files are
      * returned as a filesystem resource so large documents stream without buffering.
      */
-public org.springframework.core.io.Resource loadFileAsResource(String fileKey) {
-        if ("s3".equalsIgnoreCase(storageType)) {
-            return s3StorageService.get().loadFileAsResource(fileKey);
+    public org.springframework.core.io.Resource loadFileAsResource(String fileKey) {
+        if (useS3()) {
+            return s3Storage().loadFileAsResource(fileKey);
         }
-        Path filePath = Paths.get(localStoragePath, fileKey).normalize();
-
-        // Defence in depth: ensure the resolved path stays inside the configured storage root,
-        // so a crafted file key cannot traverse outside it.
-        Path root = Paths.get(localStoragePath).toAbsolutePath().normalize();
-        if (!filePath.toAbsolutePath().normalize().startsWith(root)) {
-            log.error("Rejected path traversal attempt for file key: {}", fileKey);
-            throw new IllegalArgumentException("Invalid file key");
-        }
-
-        return new org.springframework.core.io.FileSystemResource(filePath);
+        // resolveLocalPath also guards against traversal outside the storage root.
+        return new org.springframework.core.io.FileSystemResource(resolveLocalPath(fileKey));
     }
 
     /**
@@ -177,7 +223,7 @@ public org.springframework.core.io.Resource loadFileAsResource(String fileKey) {
      */
     private void deleteFileLocally(String fileKey) {
         try {
-            Path filePath = Paths.get(localStoragePath, fileKey);
+            Path filePath = resolveLocalPath(fileKey);
             Files.deleteIfExists(filePath);
             log.info("File deleted locally: {}", fileKey);
         } catch (IOException e) {

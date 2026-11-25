@@ -28,7 +28,7 @@ Postgres + Redis with dev-safe defaults.
 ./mvnw test                     # full suite, H2 in-memory, no credentials
 ```
 
-Flyway migrates `V1`-`V15` automatically; Hibernate is `validate`-only, so a
+Flyway migrates `V1`-`V18` automatically; Hibernate is `validate`-only, so a
 schema mismatch fails fast instead of silently altering tables.
 
 To see SQL while debugging, create the git-ignored
@@ -64,6 +64,10 @@ logger lines described in the `LOGGING` block of `application.properties`.
   other suites.
 - JaCoCo produces a coverage report via `./mvnw verify` (the `check` gate is
   deliberately disabled until coverage rises; see `pom.xml`).
+- The default H2 suite intentionally skips Flyway (the migrations are Postgres
+  specific). Run `RUN_POSTGRES_TESTS=true ./mvnw test -Dtest=FlywayMigrationTest`
+  on a machine with Docker to apply and validate every migration against a real
+  PostgreSQL 16 container.
 
 ## Conventions
 

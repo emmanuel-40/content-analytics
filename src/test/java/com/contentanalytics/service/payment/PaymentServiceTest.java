@@ -92,7 +92,7 @@ class PaymentServiceTest {
         PaymentTransaction tx = seedPending(user, 50);
 
         assertThat(tx.getStatus()).isEqualTo(PaymentStatus.PENDING);
-        assertThat(tx.getAmountKobo()).isEqualTo(400_000);
+        assertThat(tx.getAmountCents()).isEqualTo(800);
         assertThat(tx.getCredits()).isEqualTo(50);
         assertThat(tx.getCheckoutUrl()).contains("paystack.test");
     }
@@ -118,7 +118,7 @@ class PaymentServiceTest {
         int before = balance(user);
 
         stub.paid = true;
-        stub.paidAmountKobo = 100_000;
+        stub.paidAmountCents = 200;
 
         Optional<String> first = paymentService.handleWebhook(
                 webhookBody(tx.getReference()), "stub-signature");
@@ -139,7 +139,7 @@ class PaymentServiceTest {
         PaymentTransaction tx = seedPending(user, 10);
         int before = balance(user);
         stub.paid = true;
-        stub.paidAmountKobo = 100_000;
+        stub.paidAmountCents = 200;
 
         Optional<String> applied = paymentService.handleWebhook(
                 webhookBody(tx.getReference()), "attacker-signature");
@@ -156,7 +156,7 @@ class PaymentServiceTest {
         User user = user(MARKER + "-tamper@example.com");
         PaymentTransaction tx = seedPending(user, 10);
         stub.paid = true;
-        stub.paidAmountKobo = 1; // attacker edited the amount somewhere
+        stub.paidAmountCents = 1; // attacker edited the amount somewhere
 
         paymentService.handleWebhook(webhookBody(tx.getReference()), "stub-signature");
 
@@ -166,7 +166,7 @@ class PaymentServiceTest {
     }
 
     @Test
-    @DisplayName("unpaid re-query marks the transaction FAILED")
+    @DisplayName("unpaid re-query keeps the transaction PENDING for a later retry")
     void unpaidRequeryFails() {
         User user = user(MARKER + "-unpaid@example.com");
         PaymentTransaction tx = seedPending(user, 10);
@@ -175,14 +175,31 @@ class PaymentServiceTest {
         paymentService.handleWebhook(webhookBody(tx.getReference()), "stub-signature");
 
         assertThat(paymentRepository.findByReference(tx.getReference()))
-                .hasValueSatisfying(t -> assertThat(t.getStatus()).isEqualTo(PaymentStatus.FAILED));
+                .hasValueSatisfying(t -> assertThat(t.getStatus()).isEqualTo(PaymentStatus.PENDING));
+    }
+
+    @Test
+    @DisplayName("provider outage throws and leaves the payment retryable")
+    void providerOutageKeepsPaymentPending() {
+        User user = user(MARKER + "-outage@example.com");
+        PaymentTransaction tx = seedPending(user, 10);
+        stub.verifyUnavailable = true;
+
+        assertThatThrownBy(() -> paymentService.handleWebhook(
+                webhookBody(tx.getReference()), "stub-signature"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("provider unavailable");
+
+        assertThat(paymentRepository.findByReference(tx.getReference()))
+                .hasValueSatisfying(t -> assertThat(t.getStatus()).isEqualTo(PaymentStatus.PENDING));
+        assertThat(ledgerCount(user, CreditTransactionType.PURCHASE)).isZero();
     }
 
     @Test
     @DisplayName("webhook for an unknown reference is ignored")
     void unknownReferenceIgnored() {
         stub.paid = true;
-        stub.paidAmountKobo = 100_000;
+        stub.paidAmountCents = 200;
 
         Optional<String> applied = paymentService.handleWebhook(
                 webhookBody("ca-" + MARKER + "-nope"), "stub-signature");
@@ -230,30 +247,36 @@ class PaymentServiceTest {
     /** Stub Paystack: no network, behavior scripted per test via fields. */
     static class StubProvider extends PaystackProvider {
         boolean paid;
-        int paidAmountKobo;
+        int paidAmountCents;
+        boolean verifyUnavailable;
         String nextCheckoutUrl = "https://paystack.test/pay/x";
 
         public String getName() { return "STUB"; }
 
-        public InitializeResult initialize(String email, int amountKobo, String reference, String callbackUrl) {
+        public InitializeResult initialize(String email, int amountCents, String reference, String callbackUrl) {
             return new InitializeResult(nextCheckoutUrl, "stub-access");
         }
 
         public VerifyResult verify(String reference) {
-            return new VerifyResult(paid, paidAmountKobo, "2026-01-01T00:00:00Z");
+            if (verifyUnavailable) {
+                throw new IllegalStateException("payment provider unavailable (503)");
+            }
+            return new VerifyResult(paid, paidAmountCents, "2026-01-01T00:00:00Z");
         }
 
-        public boolean verifyWebhookSignature(String rawBody, String signature) {
+        @Override
+        public boolean verifyWebhookSignature(byte[] rawBody, String signature) {
             return "stub-signature".equals(signature);
         }
 
+        @Override
         public java.util.Optional<String> extractReference(java.util.Map<String, Object> payload) {
             if (!"charge.success".equals(payload.get("event"))) {
                 return java.util.Optional.empty();
             }
             Object data = payload.get("data");
             if (data instanceof java.util.Map<?, ?> dataMap) {
-                Object ref = ((java.util.Map<String, Object>) dataMap).get("reference");
+                Object ref = dataMap.get("reference");
                 if (ref != null && !ref.toString().isBlank()) {
                     return java.util.Optional.of(ref.toString());
                 }

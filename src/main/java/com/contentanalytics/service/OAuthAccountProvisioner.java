@@ -19,20 +19,20 @@ import java.util.UUID;
 
 /**
  * Maps an external identity (Google) onto a row in {@code users}.
- * 
+ *
  * Three outcomes, in priority order:
- * <ol>
- *   <li><b>Returning OAuth user</b> - the Google {@code sub} is already linked to a
- *       row; refresh the last-login timestamp and reuse it.</li>
- *   <li><b>Account linking</b> - no linked row, but the (Google-verified) email
- *       already belongs to a local password account. Attach the Google identity to
- *       that row and mark the email verified, because Google vouched for it. The
- *       owner keeps their password, so they can still sign in either way.</li>
- *   <li><b>New account</b> - create a passwordless row seeded with the profile data
- *       Google returned.</li>
- * </ol>
- * 
- * Deliberate security property: an account already linked to a <i>different</i> Google
+ *
+ *   Returning OAuth user - the Google {@code sub} is already linked to a
+ * row; refresh the last-login timestamp and reuse it.
+ * Account linking - no linked row, but the (Google-verified) email
+ * already belongs to a local password account. Attach the Google identity to
+ * that row and mark the email verified, because Google vouched for it. The
+ * owner keeps their password, so they can still sign in either way.
+ * New account - create a passwordless row seeded with the profile data
+ * Google returned.
+ *
+ *
+ * Deliberate security property: an account already linked to a different Google
  * identity is never re-pointed. Google guarantees one {@code sub} per account and does
  * not let two accounts own the same address, so a mismatch means something is wrong
  * (Workspace aliasing, a compromised recovery address, or a bug) and the safe answer is
@@ -63,7 +63,7 @@ public class OAuthAccountProvisioner {
      *
      * @param subject    the immutable Google {@code sub} claim
      * @param email      Google's {@code email} claim (already checked for
-     *                   {@code email_verified=true} by the caller)
+     * {@code email_verified=true} by the caller)
      * @param givenName  Google {@code given_name}, may be blank
      * @param familyName Google {@code family_name}, may be blank
      * @return the persisted user, always linked to Google
@@ -158,7 +158,7 @@ public class OAuthAccountProvisioner {
     }
 
     /**
-     * Build a unique username from the email local-part, e.g. {@code jane.doe} ->
+     * Build a unique username from the email local-part, e.g. {@code jane.doe} -
      * {@code jane.doe}, or {@code jane.doe-1} when that one is already taken.
      */
     private String deriveUsername(String email) {

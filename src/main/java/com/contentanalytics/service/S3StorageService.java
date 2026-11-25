@@ -3,7 +3,7 @@ package com.contentanalytics.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
@@ -13,6 +13,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.model.*;
 
@@ -23,24 +24,28 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
-@ConditionalOnProperty(name = "app.storage.type", havingValue = "s3")  // ← ONLY LOAD IF S3
+// "supabase" is production's name for the same S3-compatible Storage API.
+@ConditionalOnExpression("'${app.storage.type:local}'.equalsIgnoreCase('s3') or '${app.storage.type:local}'.equalsIgnoreCase('supabase')")
 @Slf4j
 public class S3StorageService {
 
-    @Value("${app.storage.s3.bucket-name}")
+    @Value("${app.storage.s3.bucket-name:${app.storage.supabase.bucket:${app.storage.supabase.bucket-name:}}}")
     private String bucketName;
 
-    @Value("${app.storage.s3.region:us-east-1}")
+    @Value("${app.storage.s3.region:${app.storage.supabase.region:us-east-1}}")
     private String region;
 
-    @Value("${app.storage.s3.access-key-id}")
+    @Value("${app.storage.s3.access-key-id:${app.storage.supabase.access-key:${app.storage.supabase.access-key-id:}}}")
     private String accessKey;
 
-    @Value("${app.storage.s3.secret-access-key}")
+    @Value("${app.storage.s3.secret-access-key:${app.storage.supabase.secret-key:${app.storage.supabase.secret-access-key:}}}")
     private String secretKey;
 
-    @Value("${app.storage.s3.endpoint:}")
+    @Value("${app.storage.s3.endpoint:${app.storage.supabase.endpoint:}}")
     private String endpoint;
+
+    @Value("${app.storage.s3.path-style-access:${app.storage.supabase.path-style-access:true}}")
+    private boolean pathStyleAccess;
 
     private S3Client s3Client;
     private S3Presigner s3Presigner;
@@ -50,6 +55,7 @@ public class S3StorageService {
      */
     private S3Client getS3Client() {
         if (s3Client == null) {
+            validateConfiguration();
             s3Client = buildClient();
             log.info("S3 client initialized for bucket: {}", bucketName);
         }
@@ -57,14 +63,39 @@ public class S3StorageService {
     }
 
     /**
+     * Fail fast with an actionable message instead of attempting anonymous or malformed
+     * requests when production storage is selected but its credentials were not supplied.
+     */
+    private void validateConfiguration() {
+        if (isMissing(bucketName) || isMissing(accessKey) || isMissing(secretKey)) {
+            throw new IllegalStateException(
+                    "S3-compatible storage is selected (app.storage.type=s3 or supabase) "
+                            + "but bucket name or credentials are missing. Configure "
+                            + "app.storage.s3.* or app.storage.supabase.*");
+        }
+    }
+
+    private boolean isMissing(String value) {
+        return value == null || value.isBlank() || value.contains("${");
+    }
+
+    private S3Configuration serviceConfiguration() {
+        return S3Configuration.builder()
+                .pathStyleAccessEnabled(pathStyleAccess)
+                .build();
+    }
+
+    /**
      * Initialize the presigner used for private, time-limited URLs.
-     * 
+     *
      * Built separately from the client because {@code S3Client} has no presigner factory.
      */
     private S3Presigner getS3Presigner() {
         if (s3Presigner == null) {
+            validateConfiguration();
             S3Presigner.Builder builder = S3Presigner.builder()
                     .region(Region.of(region))
+                    .serviceConfiguration(serviceConfiguration())
                     .credentialsProvider(StaticCredentialsProvider.create(
                             AwsBasicCredentials.create(accessKey, secretKey)));
 
@@ -82,6 +113,7 @@ public class S3StorageService {
 
             var builder = S3Client.builder()
                     .region(Region.of(region))
+                    .serviceConfiguration(serviceConfiguration())
                     .credentialsProvider(StaticCredentialsProvider.create(credentials));
 
             if (endpoint != null && !endpoint.isBlank()) {
@@ -179,11 +211,11 @@ public class S3StorageService {
 
     /**
      * Generate a time-limited, signed URL for a private object.
-     * 
+     *
      * This is how a private bucket stays private while still being renderable in a browser:
      * the backend hands out a short-lived URL instead of a permanent public one, so a leaked
      * link stops working on its own.
-     * 
+     *
      * Supabase Storage supports presigning via query parameters using AWS Signature Version 4,
      * which is exactly what the SDK produces.
      *
@@ -212,15 +244,12 @@ public String generatePresignedUrl(String fileKey, java.time.Duration duration) 
 }
 
 /**
-     * Get a direct object URL.
-     * 
-     * Deprecated: this only resolves for a PUBLIC bucket. On a private bucket objects must be
-     * served with {@link #generatePresignedUrl(String, java.time.Duration)}. No application
-     * code calls this - document downloads are streamed through the backend instead.
+     * Legacy direct object URL helper. This only resolves for a PUBLIC bucket; on a private
+     * bucket objects are served with {@link #generatePresignedUrl(String, java.time.Duration)}.
+     * Application downloads are streamed through the backend instead.
      */
-    @Deprecated
     public String getFileUrl(String fileKey) {
-        log.warn("getFileUrl is deprecated and unsafe on a private bucket - use generatePresignedUrl");
+        log.warn("Direct object URL requested - this only works for a public bucket");
         return String.format("https://%s.s3.%s.amazonaws.com/%s", bucketName, region, fileKey);
     }
 
@@ -247,7 +276,7 @@ public String generatePresignedUrl(String fileKey, java.time.Duration duration) 
 
     /**
      * Download a file from S3 into memory so it can be streamed to the client.
-     * 
+     *
      * S3 does not expose a seekable stream through the sync client, so the object is buffered.
      * This is bounded by the configured maximum upload size.
      */

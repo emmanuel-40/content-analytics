@@ -49,9 +49,9 @@ Paystack webhook, never from a browser callback alone.
 ## Architecture
 
 Monolith layout: **controllers → services → JPA repositories → PostgreSQL**.
-Redis backs cache, login lockout, idempotency keys, and distributed locks.
-Document analysis runs async (`@Async` or RabbitMQ). Auth is one JWT cookie
-path for every caller; Google OAuth only provisions into the same `users`
+Redis backs cache, login lockout, idempotency keys, and atomic rate-limit
+counters. Document analysis runs async (`@Async` or RabbitMQ). Auth is one JWT
+cookie path for every caller; Google OAuth only provisions into the same `users`
 table.
 
 ```mermaid
@@ -117,19 +117,24 @@ sequenceDiagram
 ```mermaid
 flowchart LR
   Upload[POST upload] --> Persist[Save Document UPLOADED]
-  Persist --> Queue{JobQueue}
+  Persist --> AfterCommit[afterCommit publish]
+  AfterCommit --> Queue{JobQueue}
   Queue -->|async| AsyncQ[AsyncJobQueue]
   Queue -->|rabbitmq| RMQ[RabbitMqJobQueue]
   AsyncQ --> Proc[DocumentProcessingService]
   RMQ --> Proc
-  Proc --> Extract[Extract text]
+  Proc --> Claim[claimForProcessing FOR UPDATE]
+  Claim --> Extract[Extract text via StorageService]
   Extract --> Basic[Word / char counts]
   Basic --> Credits{hasCredits?}
   Credits -->|yes| Consume[consumeCredits FOR UPDATE]
   Consume --> AI[Gemini / Anthropic]
   Credits -->|no| Done[COMPLETED basic only]
   AI --> Done
-  Proc --> WS[WebSocket progress]
+  Done --> WS[WebSocket progress after commit]
+  Proc -->|failure, under 3 attempts| Retry[resetForRetry to UPLOADED]
+  Retry --> Proc
+  Proc -->|failure, attempts = 3| Failed[FAILED + DLQ]
 ```
 
 More module detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -240,32 +245,40 @@ sequenceDiagram
   participant U as User / SPA
   participant API as PaymentService
   participant DB as payment_transactions
+  participant RD as Redis dedupe
   participant PS as Paystack
   participant CR as CreditService
 
   U->>API: POST /api/payments/initialize
-  API->>DB: INSERT PENDING (reference = ca-uuid)
-  API->>PS: initialize checkout
+  API->>DB: INSERT + COMMIT PENDING (reference = ca-uuid)
+  API->>PS: initialize checkout (no tx open)
   API-->>U: checkoutUrl
 
   Note over PS,API: User pays on Paystack
 
-  PS->>API: POST /api/payments/webhook (HMAC)
-  API->>PS: GET /transaction/verify/{reference}
+  PS->>API: POST /api/payments/webhook (raw bytes + HMAC)
+  API->>API: verify HMAC FIRST (reject forged body)
+  API->>RD: claim dedupe key AFTER HMAC
+  API->>PS: GET /transaction/verify/{reference} (no tx open)
   alt paid + amount matches + still PENDING
+    API->>DB: REQUIRES_NEW: lock row, credit ledger, status = SUCCESS
     API->>CR: purchaseCredits(user, credits, reference)
-    API->>DB: status = SUCCESS
+    API->>RD: mark processed (burn dedupe key)
   else already SUCCESS
     API-->>PS: ack, no second credit
-  else unpaid / mismatch
+  else unpaid / provider lag
+    API->>DB: keep PENDING, save raw webhook
+    API->>RD: release claim so retry can succeed
+  else amount mismatch
     API->>DB: status = FAILED
+    API->>RD: release claim
   end
 
   U->>API: GET /api/payments/verify?reference=...
-  Note over API: Same applyVerifiedPayment path
+  Note over API: Same applyVerifiedPayment path, owner-checked
 ```
 
-Credit packs (kobo): 10 → 100_000, 50 → 400_000, 120 → 800_000.
+Credit packs (USD cents, Paystack `currency=USD`): 10 → 200 ($2.00), 50 → 800 ($8.00), 120 → 1_600 ($16.00).
 
 Admin-only `POST /api/subscription/purchase-credits` seeds balances for demos/tests — not the real money path.
 
@@ -282,10 +295,13 @@ How money and credits stay consistent under load:
 | Period rollover vs spend | Rollover under the same pessimistic lock in `consumeCredits` / `getOrCreateSubscription` |
 | Payment double-delivery | Status guard (SUCCESS → no-op) + unique `payment_transactions.reference` |
 | Checkout client retries | `@Idempotent` + Redis (`Idempotency-Key`) on initialize |
-| Webhook retries | `@WebhookIdempotent` + Redis event dedup |
-| Login abuse | Redis lockout (`LoginAttemptService`) + Bucket4j on login/register |
-| Token invalidation | `users.token_version` embedded in refresh JWT |
-| Optimistic conflicts | JPA `@Version` on subscription / payment / credit / user rows |
+| Webhook retries | HMAC verified first; Redis claim taken afterwards and released on every non-crediting outcome; DB status guard is authoritative |
+| Login abuse | Redis lockout (`LoginAttemptService`) + atomic Redis fixed-window counters on login/register |
+| Refresh-token replay | Single-use conditional `UPDATE` in `refresh_tokens`; reuse revokes the whole family and bumps `token_version` |
+| Token invalidation | `users.token_version` embedded in **both** access and refresh JWTs; the filter checks it against the DB on every request |
+| Document jobs | `SELECT … FOR UPDATE` claim + guarded status transitions; duplicate deliveries are no-ops, retries are bounded |
+| Optimistic conflicts | JPA `@Version` on subscription / payment / credit / user / document rows |
+| External calls | Provider HTTP (Paystack), storage I/O and queue publishes happen **outside** DB transactions; commits are completed before consumers can observe the work |
 
 ```mermaid
 flowchart TD
@@ -333,6 +349,96 @@ Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs versioned SQL from
 | V13 | Drop unused profile `company` / `job_title` |
 | V14 | DB CHECK constraints (positive amounts, non-negative credits, period bounds) |
 | V15 | JPA `@Version` columns + unique purchase / AI-analysis `reference_id` indexes |
+| V16 | `refresh_tokens`: single-use rotation, family replay detection, hash-only storage |
+| V17 | `documents.version` optimistic-lock column for guarded job transitions |
+| V18 | `payment_transactions.amount_cents` - USD pricing (cents, not kobo) |
+
+### Data model (core tables)
+
+```mermaid
+erDiagram
+  USERS ||--o{ REFRESH_TOKENS : "1:N rotations"
+  USERS ||--o| SUBSCRIPTIONS : "1:1 allowance"
+  USERS ||--o{ CREDIT_TRANSACTIONS : "1:N ledger"
+  USERS ||--o{ PAYMENT_TRANSACTIONS : "1:N checkouts"
+  USERS ||--o{ DOCUMENTS : "1:N uploads"
+  PAYMENT_TRANSACTIONS ||--o| CREDIT_TRANSACTIONS : "reference credits once"
+  DOCUMENTS ||--o| CREDIT_TRANSACTIONS : "reference AI debit once"
+
+  USERS {
+    uuid id PK
+    varchar email UK
+    varchar username UK
+    varchar provider
+    varchar provider_subject
+    boolean email_verified
+    int token_version
+  }
+  REFRESH_TOKENS {
+    uuid id PK
+    uuid user_id FK
+    uuid family_id
+    varchar token_hash UK "SHA-256 only"
+    varchar status "ACTIVE USED REVOKED"
+    uuid replaced_by
+    timestamp expires_at
+  }
+  SUBSCRIPTIONS {
+    uuid id PK
+    uuid user_id FK,UK
+    varchar tier
+    int monthly_credit_allowance
+    int purchased_credits
+  }
+  PAYMENT_TRANSACTIONS {
+    uuid id PK
+    uuid user_id FK
+    varchar reference UK
+    varchar status "PENDING SUCCESS FAILED"
+    int amount_cents
+    int credits
+  }
+  CREDIT_TRANSACTIONS {
+    uuid id PK
+    uuid user_id FK
+    varchar type
+    varchar reference_id "unique per PURCHASE AI"
+    int amount
+  }
+  DOCUMENTS {
+    uuid id PK
+    uuid user_id FK
+    varchar status "UPLOADED PROCESSING COMPLETED FAILED"
+    bigint version
+    varchar file_key
+  }
+```
+
+### Document status machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> UPLOADED : upload + commit
+  UPLOADED --> PROCESSING : worker claim (FOR UPDATE)
+  PROCESSING --> COMPLETED : guarded transition + results
+  PROCESSING --> UPLOADED : retry with attempts left
+  PROCESSING --> FAILED : retries exhausted
+  UPLOADED --> FAILED : enqueue failed
+  UPLOADED --> FAILED : delete rejected while PROCESSING only
+  COMPLETED --> [*]
+  FAILED --> UPLOADED : explicit retry endpoint
+```
+
+### Refresh token lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> ACTIVE : login / OAuth / rotation
+  ACTIVE --> USED : single-use claim (conditional UPDATE)
+  USED --> REVOKED : replay detected -> revoke family + bump token_version
+  ACTIVE --> REVOKED : logout / password change / timeout
+  REVOKED --> [*]
+```
 
 ---
 
@@ -381,15 +487,15 @@ Runbook: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 src/main/java/com/contentanalytics/
   config/           Security, CORS, CSRF, WebSocket, RabbitMQ, Clock
   controller/       Auth, Profile, Document, Payment, Subscription, Health
-  service/          Auth, Credits, Documents, Storage, AI, Idempotency, Locks
+  service/          Auth, Credits, Documents, Storage, AI, Idempotency, RateLimit
   service/payment/  PaymentService, PaystackProvider
-  security/         JWT filter/provider, Google OAuth handlers + provisioner
-  aspect/           Idempotency, webhook idempotency, rate-limit annotations
-  entity/           User, Document, Subscription, PaymentTransaction, …
-  repository/       JPA + pessimistic lock queries
+  security/         JWT filter/provider, TokenSessionValidator, OAuth handlers
+  aspect/           Idempotency + rate-limit annotations
+  entity/           User, RefreshToken, Document, Subscription, PaymentTransaction, …
+  repository/       JPA + pessimistic lock / conditional claim queries
   exception/        GlobalExceptionHandler + domain errors
-src/main/resources/db/migration/   Flyway V1–V15
-src/test/java/…                    H2 suite
+src/main/resources/db/migration/   Flyway V1–V18
+src/test/java/…                    H2 suite + opt-in real-Postgres migration test
 ```
 
 ---

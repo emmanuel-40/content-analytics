@@ -10,7 +10,7 @@ import java.util.UUID;
 
 /**
  * One checkout attempt against a payment provider.
- * 
+ *
  * Created PENDING by {@code POST /api/payments/initialize} before any money
  * moves. Flipped to SUCCESS only by the webhook after HMAC verification and a
  * server-side re-query of the transaction - that flip is the single place
@@ -35,6 +35,7 @@ public class PaymentTransaction {
 
     @Version
     @Column(name = "version", nullable = false)
+    @Builder.Default
     private Long version = 0L;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
@@ -42,7 +43,7 @@ public class PaymentTransaction {
     private User user;
 
     /**
-     * Our reference, generated as {@code ca-<uuid>} and sent to Paystack as-is.
+     * Our reference, generated as {@code ca-UUID} and sent to Paystack as-is.
      * Unique: the webhook lookup and the idempotency guard both key off it.
      */
     @Column(nullable = false, unique = true, length = 100)
@@ -52,9 +53,9 @@ public class PaymentTransaction {
     @Builder.Default
     private String provider = "PAYSTACK";
 
-    /** Amount charged, in kobo (NGN x 100) - Paystack prices the smallest unit. */
-    @Column(name = "amount_kobo", nullable = false)
-    private Integer amountKobo;
+    /** Amount charged, in USD cents - Paystack prices in the smallest unit. */
+    @Column(name = "amount_cents", nullable = false)
+    private Integer amountCents;
 
     /** Credits to grant once the charge confirms. */
     @Column(nullable = false)

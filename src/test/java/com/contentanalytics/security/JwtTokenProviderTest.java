@@ -79,11 +79,11 @@ class JwtTokenProviderTest {
         UUID userId = UUID.randomUUID();
         String token = tokenProvider.generateAccessToken(userId, "oliver", "o@example.com");
 
-        // 1 ms before expiry -> still valid.
+        // 1 ms before expiry - still valid.
         Clock justBefore = Clock.fixed(FIXED_NOW.plusMillis(ACCESS_TTL_MS - 1), ZoneOffset.UTC);
         assertThat(providerWith(justBefore, ACCESS_TTL_MS).validateToken(token)).isTrue();
 
-        // 1 ms after expiry -> invalid. Same token, only the clock moved.
+        // 1 ms after expiry - invalid. Same token, only the clock moved.
         Clock justAfter = Clock.fixed(FIXED_NOW.plusMillis(ACCESS_TTL_MS + 1), ZoneOffset.UTC);
         assertThat(providerWith(justAfter, ACCESS_TTL_MS).validateToken(token)).isFalse();
     }
@@ -94,7 +94,7 @@ class JwtTokenProviderTest {
         UUID userId = UUID.randomUUID();
         String token = tokenProvider.generateAccessToken(userId, "oliver", "o@example.com");
 
-        // Clock pinned exactly on exp. RFC 7519 requires rejection once now >= exp, so this
+        // Clock pinned exactly on exp. RFC 7519 requires rejection once now = exp, so this
         // must be invalid. With the old exp.before(now) check this instant read as still-valid,
         // leaving a 1 ms window an expired token could authenticate - hence the fix to !exp.after(now).
         Clock exactlyExp = Clock.fixed(FIXED_NOW.plusMillis(ACCESS_TTL_MS), ZoneOffset.UTC);

@@ -2,7 +2,7 @@ package com.contentanalytics.entity;
 
 /**
  * Subscription tier.
- * 
+ *
  * Each tier grants a monthly credit allowance that gates how many AI analyses a user may run.
  */
 public enum SubscriptionTier {

@@ -2,6 +2,7 @@ package com.contentanalytics.security;
 
 import com.contentanalytics.dto.TokenResponseDto;
 import com.contentanalytics.entity.User;
+import com.contentanalytics.entity.UserStatus;
 import com.contentanalytics.repository.UserRepository;
 import com.contentanalytics.service.AuthService;
 import com.contentanalytics.util.CookieUtil;
@@ -22,13 +23,13 @@ import java.util.UUID;
 
 /**
  * Hands a successful Google handshake over to the existing JWT session.
- * 
+ *
  * The browser arrives here as a top-level navigation from Google, so the only useful
  * response is a redirect back to the SPA with cookies attached - there is no request
  * body to put tokens in. We mint the exact same access + refresh pair that
  * {@code POST /api/auth/login} produces, store them in the same HttpOnly cookies, and
- * bounce to {@code <frontend>/auth/callback} so the SPA can settle its own state.
- * 
+ * bounce to {@code frontend URL/auth/callback} so the SPA can settle its own state.
+ *
  * Nothing about this class is Google-specific beyond the attribute keys; a second
  * provider would reuse it unchanged.
  */
@@ -76,6 +77,16 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
         User user = userRepository.findById(UUID.fromString(userId))
                 .orElseThrow(() -> new IllegalStateException("OAuth user " + userId + " vanished mid-handshake"));
 
+        // OAuth must not be a back door around revocation: a disabled account or
+        // one whose email is no longer verified gets no new session.
+        if (user.getStatus() != UserStatus.ACTIVE || !Boolean.TRUE.equals(user.getEmailVerified())) {
+            log.warn("Google sign-in refused for ineligible account {}", user.getId());
+            response.sendRedirect(redirect("error"));
+            return;
+        }
+
+        // issueTokens starts a fresh refresh-token family through the same code
+        // path used by password login, so rotations and revocation apply here too.
         TokenResponseDto tokens = authService.issueTokens(user);
 
         cookieUtil.setAccessTokenCookie(response, tokens.getAccessToken(), toSeconds(accessTokenTtlMs));

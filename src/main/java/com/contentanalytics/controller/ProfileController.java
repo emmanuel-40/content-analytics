@@ -125,11 +125,11 @@ public class ProfileController {
     /**
      * GET /api/profile/picture/file?key={storageKey}
      * Stream a stored profile-picture variant when storage is local.
-     * 
+     *
      * Only used by {@code local} storage; on S3/Supabase the client gets a presigned URL
      * instead. Kept authenticated and ownership-checked so a private filesystem stays private
      * too.
-     * 
+     *
      * ImageService names every variant {@code profile-{userId}-{size}-{timestamp}.jpg}, so the
      * caller's own UUID is baked into the key. We only ever serve keys in that namespace --
      * anything else (other users' keys, path traversal) is rejected before touching disk.

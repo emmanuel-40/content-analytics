@@ -18,9 +18,10 @@ import java.util.UUID;
 public class PaymentTransactionDto {
 
     private UUID id;
+    private UUID userId;
     private String reference;
     private String provider;
-    private int amountKobo;
+    private int amountCents;
     private int credits;
     private String status;
     private String checkoutUrl;

@@ -43,7 +43,7 @@ public class ProfileService {
 
     /**
      * How long a generated image URL stays valid.
-     * <p>
+     *
      * Short enough that a leaked URL stops working, long enough to survive a page render plus
      * a few navigation clicks.
      */
@@ -51,15 +51,14 @@ public class ProfileService {
 
     /**
      * Resolve a stored image key into something a browser can load.
-     * <p>
+     *
      * The {@code *_url} columns on {@code profile_pictures} actually hold storage keys, not URLs.
      * Turning them into a real URL here is what allows the bucket to stay private:
-     * <ul>
-     *   <li>S3 / Supabase - a short-lived presigned URL</li>
-     *   <li>local filesystem - the authenticated serving route, so local dev needs no public
-     *       directory either</li>
-     * </ul>
      *
+     *   S3 / Supabase - a short-lived presigned URL
+     * local filesystem - the authenticated serving route, so local dev needs no public
+     * directory either
+     * *
      * @param storageKey the key to resolve
      * @return a loadable URL, or {@code null} when there is nothing to serve
      */
@@ -396,7 +395,7 @@ public class ProfileService {
 
     /**
      * Best-effort removal of image objects that are being replaced.
-     * <p>
+     *
      * Orphaned bytes in a private bucket are a real cost, but failing the user-visible upload
      * because a cleanup step could not find an object (it may already have been purged, or the
      * key may never have been written at all) would be worse. Duplicates are collapsed because

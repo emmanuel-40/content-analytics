@@ -18,12 +18,17 @@ import org.springframework.data.domain.Sort;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @Service
@@ -42,6 +47,22 @@ public class DocumentService {
 
     @Value("${app.allowed-file-types:pdf,txt,docx,pptx}")
     private String allowedFileTypes;
+
+    /**
+     * Snapshot handed to a worker after a successful atomic claim. It deliberately contains
+     * no managed JPA entity: the claim transaction has committed by the time work starts.
+     */
+    public record ClaimedDocument(UUID id, UUID userId, String fileName,
+                                  String fileKey, String mimeType) {
+    }
+
+    /**
+     * Analysis results persisted together with the terminal COMPLETED transition.
+     */
+    public record ProcessedDocument(String extractedText, int wordCount, int characterCount,
+                                    String summary, String keyTopics, String sentiment,
+                                    Float confidenceScore) {
+    }
 
     /**
      * Upload a document
@@ -95,8 +116,9 @@ public class DocumentService {
         document = documentRepository.save(document);
         log.info("Document created with ID: {} for user: {}", document.getId(), userId);
 
-        // Queue for async processing via the configured job queue
-        jobQueue.enqueueDocumentProcessing(document.getId(), userId);
+        // Queue only after the INSERT is committed, otherwise a worker can claim a
+        // document the creating transaction may still roll back.
+        enqueueAfterCommit(document.getId(), userId);
 
         return mapToResponseDto(document);
     }
@@ -229,31 +251,33 @@ public class DocumentService {
     public void retryFailedDocument(UUID documentId, UUID userId) {
         Document document = documentRepository.findByIdAndUserId(documentId, userId)
                 .orElseThrow(() -> new DocumentNotFoundException("Document not found"));
+        log.debug("Retry requested for document {} owned by {}", document.getId(), document.getUser().getId());
 
-        if (document.getStatus() != DocumentStatus.FAILED) {
+        // Guarded, row-locked transition: two concurrent retries cannot both requeue.
+        boolean reset = transition(documentId, EnumSet.of(DocumentStatus.FAILED),
+                DocumentStatus.UPLOADED, 0f, null, d -> d.setProcessingError(null));
+        if (!reset) {
             throw new IllegalArgumentException("Only failed documents can be retried");
         }
 
         log.info("Retrying processing for document: {}", documentId);
-
-        // Reset to UPLOADED before re-queueing so the dashboard reflects the retry immediately.
-        document.setStatus(DocumentStatus.UPLOADED);
-        document.setProcessingProgress(0f);
-        document.setProcessingError(null);
-        documentRepository.save(document);
-
-        jobQueue.enqueueDocumentProcessing(documentId, userId);
+        enqueueAfterCommit(documentId, userId);
     }
 
     /**
      * Delete document
-     * Verify ownership, delete from storage and DB
+     * Verify ownership, delete from storage and DB. Deletion is rejected while a worker
+     * owns the row (PROCESSING) so storage and database cannot diverge mid-analysis.
      */
     public void deleteDocument(UUID documentId, UUID userId) {
         log.info("Deleting document: {} for user: {}", documentId, userId);
 
-        Document document = documentRepository.findByIdAndUserId(documentId, userId)
+        Document document = documentRepository.findByIdAndUserIdForUpdate(documentId, userId)
                 .orElseThrow(() -> new DocumentNotFoundException("Document not found"));
+
+        if (document.getStatus() == DocumentStatus.PROCESSING) {
+            throw new IllegalStateException("Cannot delete a document while it is being processed");
+        }
 
         // Delete from storage
         storageService.deleteFile(document.getFileKey());
@@ -268,7 +292,7 @@ public class DocumentService {
      * Load a document for download, verifying ownership.
      *
      * @throws com.contentanalytics.exception.DocumentNotFoundException if the document
-     *         does not exist or is not owned by the requesting user (avoids leaking existence)
+     * does not exist or is not owned by the requesting user (avoids leaking existence)
      */
     public DownloadFileDto getDocumentForDownload(UUID documentId, UUID userId) {
         log.debug("Preparing download for document: {} (user: {})", documentId, userId);
@@ -331,31 +355,160 @@ public class DocumentService {
     }
 
     /**
-     * Update document processing status
-     * Called by async processing service
+     * Atomically claim a document for processing. Returns {@code null} when another worker
+     * owns the row or the work is already finished, so duplicate deliveries are harmless.
      */
-    @Transactional
-    public void updateProcessingStatus(UUID documentId, DocumentStatus status, Float progress, String error) {
-        Document document = documentRepository.findById(documentId)
-                .orElseThrow(() -> new DocumentNotFoundException("Document not found"));
+    public ClaimedDocument claimForProcessing(UUID documentId) {
+        return documentRepository.findByIdAndStatusForUpdate(documentId, DocumentStatus.UPLOADED)
+                .map(document -> {
+                    document.setStatus(DocumentStatus.PROCESSING);
+                    document.setProcessingProgress(10f);
+                    document.setProcessingError(null);
+                    document.setProcessingCompletedAt(null);
+                    document.setProcessingStartedAt(LocalDateTime.now());
+                    documentRepository.save(document);
 
-        document.setStatus(status);
+                    log.info("Document {} claimed for processing", documentId);
+                    return new ClaimedDocument(document.getId(), document.getUser().getId(),
+                            document.getFileName(), document.getFileKey(), document.getMimeType());
+                })
+                .orElse(null);
+    }
+
+    /**
+     * Guarded progress/terminal status update. Every call locks the row and validates the
+     * current status before writing; a stale worker can never move a document backwards.
+     *
+     * @return {@code true} when the transition was applied
+     */
+    public boolean updateProcessingStatus(UUID documentId, DocumentStatus status,
+                                          Float progress, String error) {
+        EnumSet<DocumentStatus> expected = switch (status) {
+            case PROCESSING -> EnumSet.of(DocumentStatus.PROCESSING);
+            case COMPLETED -> EnumSet.of(DocumentStatus.PROCESSING);
+            case FAILED -> EnumSet.of(DocumentStatus.PROCESSING, DocumentStatus.UPLOADED);
+            case UPLOADED -> EnumSet.of(DocumentStatus.FAILED, DocumentStatus.PROCESSING);
+        };
+        return transition(documentId, expected, status, progress, error, d -> {
+        });
+    }
+
+    /**
+     * Persist analysis results and move PROCESSING  to  COMPLETED in one transaction.
+     */
+    public boolean completeProcessing(UUID documentId, ProcessedDocument result) {
+        Objects.requireNonNull(result, "result");
+        return transition(documentId, EnumSet.of(DocumentStatus.PROCESSING),
+                DocumentStatus.COMPLETED, 100f, null, document -> {
+                    document.setExtractedText(result.extractedText());
+                    document.setWordCount(result.wordCount());
+                    document.setCharacterCount(result.characterCount());
+                    document.setSummary(result.summary());
+                    document.setKeyTopics(result.keyTopics());
+                    document.setSentiment(result.sentiment());
+                    document.setConfidenceScore(result.confidenceScore());
+                });
+    }
+
+    /**
+     * Terminal failure. Returns {@code false} if another worker already finished the job,
+     * in which case no failure notification may be emitted.
+     */
+    public boolean failProcessing(UUID documentId, String error) {
+        return transition(documentId,
+                EnumSet.of(DocumentStatus.PROCESSING, DocumentStatus.UPLOADED),
+                DocumentStatus.FAILED, 0f, error, d -> d.setProcessingCompletedAt(null));
+    }
+
+    /**
+     * Return a claimed document to the retryable UPLOADED state between bounded attempts.
+     * Publishing failures are moved to FAILED by {@link #markEnqueueFailed} so the user can
+     * retry them explicitly.
+     */
+    public void resetForRetry(UUID documentId, String error) {
+        int updated = documentRepository.resetClaimedDocument(documentId,
+                EnumSet.of(DocumentStatus.PROCESSING, DocumentStatus.UPLOADED),
+                DocumentStatus.UPLOADED, error, LocalDateTime.now());
+        if (updated == 0) {
+            log.warn("Could not mark document {} retryable - it is no longer UPLOADED/PROCESSING",
+                    documentId);
+        }
+    }
+
+    private boolean transition(UUID documentId, Set<DocumentStatus> expectedStatuses,
+                               DocumentStatus target, Float progress, String error,
+                               Consumer<Document> mutator) {
+        Document document = documentRepository.findByIdForUpdate(documentId).orElse(null);
+        if (document == null || !expectedStatuses.contains(document.getStatus())) {
+            log.warn("Skipping stale transition of document {} (current: {}) to {}",
+                    documentId, document == null ? "MISSING" : document.getStatus(), target);
+            return false;
+        }
+
+        document.setStatus(target);
         document.setProcessingProgress(progress);
+        document.setUpdatedAt(LocalDateTime.now());
 
-        if (status == DocumentStatus.PROCESSING && document.getProcessingStartedAt() == null) {
+        if (target == DocumentStatus.PROCESSING && document.getProcessingStartedAt() == null) {
             document.setProcessingStartedAt(LocalDateTime.now());
         }
-
-        if (status == DocumentStatus.COMPLETED) {
+        if (target == DocumentStatus.COMPLETED) {
             document.setProcessingCompletedAt(LocalDateTime.now());
         }
-
         if (error != null) {
             document.setProcessingError(error);
         }
 
+        mutator.accept(document);
         documentRepository.save(document);
-        log.debug("Document {} status updated to: {} (progress: {}%)", documentId, status, progress);
+        log.debug("Document {} status updated to: {} (progress: {}%)", documentId, target, progress);
+        return true;
+    }
+
+    /**
+     * Broker publish failed after commit: move to FAILED with the reason so the document is
+     * visible in the dashboard and can be retried with the existing retry endpoint.
+     */
+    public void markEnqueueFailed(UUID documentId, String error) {
+        int updated = documentRepository.resetClaimedDocument(documentId,
+                EnumSet.of(DocumentStatus.PROCESSING, DocumentStatus.UPLOADED),
+                DocumentStatus.FAILED, error, LocalDateTime.now());
+        if (updated == 0) {
+            log.warn("Could not mark document {} as failed after enqueue error", documentId);
+        }
+    }
+
+    /**
+     * Publish only after the creating/creating-retry transaction has committed. A broker
+     * outage leaves the document FAILED (with a visible reason), never half-created and
+     * never silently stuck in PROCESSING.
+     */
+    private void enqueueAfterCommit(UUID documentId, UUID userId) {
+        Runnable publish = () -> {
+            try {
+                jobQueue.enqueueDocumentProcessing(documentId, userId);
+            } catch (Exception e) {
+                log.error("Failed to enqueue document {} for processing; marking it FAILED for explicit retry",
+                        documentId, e);
+                try {
+                    markEnqueueFailed(documentId, "Failed to enqueue processing job: " + e.getMessage());
+                } catch (Exception resetFailure) {
+                    log.error("Could not mark document {} FAILED after enqueue failure",
+                            documentId, resetFailure);
+                }
+            }
+        };
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    publish.run();
+                }
+            });
+        } else {
+            publish.run();
+        }
     }
 
     /**

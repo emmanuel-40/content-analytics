@@ -26,6 +26,7 @@ public class User {
 
     @Version
     @Column(name = "version", nullable = false)
+    @Builder.Default
     private Long version = 0L;
 
     @Column(nullable = false, unique = true, length = 100)
@@ -94,13 +95,5 @@ public class User {
 
     @Column
     private LocalDateTime lastPasswordChangeAt;
-
-    /** Number of consecutive failed login attempts (reset on success). */
-    @Column(nullable = false)
-    private Integer failedLoginAttempts = 0;
-
-    /** When the account is locked until (null = not locked). */
-    @Column
-    private LocalDateTime lockedUntil;
 
 }

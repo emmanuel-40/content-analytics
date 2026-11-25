@@ -4,10 +4,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.w3c.dom.Document;
-import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
@@ -16,9 +14,6 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -28,9 +23,6 @@ import java.util.zip.ZipInputStream;
 public class FileExtractionService {
 
     private final StorageService storageService;
-
-    @Value("${app.storage.local.path:/tmp/content-analytics/uploads}")
-    private String localStoragePath;
 
     /**
      * Extract text from document based on MIME type
@@ -52,7 +44,7 @@ public class FileExtractionService {
             } else {
                 throw new RuntimeException("Unsupported file type: " + mimeType);
             }
-      
+
             if (text != null && !text.isBlank()) {
                 log.debug("Text extraction successful. Extracted {} characters", text.length());
             } else {
@@ -73,8 +65,7 @@ public class FileExtractionService {
     private String extractFromPDF(String fileKey) throws IOException {
         log.debug("Extracting text from PDF: {}", fileKey);
 
-        Path filePath = Paths.get(localStoragePath, fileKey);
-        byte[] fileBytes = Files.readAllBytes(filePath);
+        byte[] fileBytes = storageService.loadFileBytes(fileKey);
 
         try (PDDocument document =
                      PDDocument.load(new ByteArrayInputStream(fileBytes))) {
@@ -90,8 +81,7 @@ public class FileExtractionService {
     private String extractFromTXT(String fileKey) throws IOException {
         log.debug("Extracting text from TXT: {}", fileKey);
 
-        java.nio.file.Path filePath = Paths.get(localStoragePath, fileKey);
-        return new String(Files.readAllBytes(filePath), StandardCharsets.UTF_8);
+        return new String(storageService.loadFileBytes(fileKey), StandardCharsets.UTF_8);
     }
 
     /**
@@ -101,8 +91,7 @@ public class FileExtractionService {
     private String extractFromDOCX(String fileKey) throws Exception {
         log.debug("Extracting text from DOCX: {}", fileKey);
 
-        java.nio.file.Path filePath = Paths.get(localStoragePath, fileKey);
-        byte[] fileBytes = Files.readAllBytes(filePath);
+        byte[] fileBytes = storageService.loadFileBytes(fileKey);
 
         StringBuilder text = new StringBuilder();
 
@@ -123,7 +112,7 @@ public class FileExtractionService {
                     DocumentBuilder builder = factory.newDocumentBuilder();
                     Document doc = builder.parse(new ByteArrayInputStream(xmlContent.toString().getBytes()));
 
-                    // Extract text from <w:t> elements
+                    // Extract text from  elements
                     NodeList textElements = doc.getElementsByTagName("w:t");
                     for (int i = 0; i < textElements.getLength(); i++) {
                         Node node = textElements.item(i);
@@ -145,8 +134,7 @@ public class FileExtractionService {
     private String extractFromPPTX(String fileKey) throws Exception {
         log.debug("Extracting text from PPTX: {}", fileKey);
 
-        java.nio.file.Path filePath = Paths.get(localStoragePath, fileKey);
-        byte[] fileBytes = Files.readAllBytes(filePath);
+        byte[] fileBytes = storageService.loadFileBytes(fileKey);
 
         StringBuilder text = new StringBuilder();
 
@@ -167,7 +155,7 @@ public class FileExtractionService {
                     DocumentBuilder builder = factory.newDocumentBuilder();
                     Document doc = builder.parse(new ByteArrayInputStream(xmlContent.toString().getBytes()));
 
-                    // Extract text from <a:t> elements
+                    // Extract text from  elements
                     NodeList textElements = doc.getElementsByTagName("a:t");
                     for (int i = 0; i < textElements.getLength(); i++) {
                         Node node = textElements.item(i);

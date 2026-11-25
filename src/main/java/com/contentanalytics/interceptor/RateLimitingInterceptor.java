@@ -1,76 +1,98 @@
 package com.contentanalytics.interceptor;
 
-import com.contentanalytics.config.RateLimitingConfig;
-import io.github.bucket4j.Bucket;
-import io.github.bucket4j.ConsumptionProbe;
+import com.contentanalytics.service.RateLimitingService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 
-import java.util.concurrent.TimeUnit;
-
+/**
+ * Distributed login/register throttling.
+ *
+ * The old Bucket4j implementation kept buckets in a local ConcurrentHashMap,
+ * so an attacker could multiply the limit by the number of backend instances.
+ * Counters now live in Redis and are updated with one atomic Lua script.
+ */
 @Component
 @RequiredArgsConstructor
 @Slf4j
 public class RateLimitingInterceptor implements HandlerInterceptor {
 
-    private final RateLimitingConfig rateLimitingConfig;
+    private final RateLimitingService rateLimitingService;
+
+    @Value("${app.rate-limit.enabled:true}")
+    private boolean rateLimitingEnabled;
+
+    @Value("${app.rate-limit.login.max-requests:5}")
+    private int loginMaxRequests;
+
+    @Value("${app.rate-limit.login.window-seconds:900}")
+    private int loginWindowSeconds;
+
+    @Value("${app.rate-limit.register.max-requests:3}")
+    private int registerMaxRequests;
+
+    @Value("${app.rate-limit.register.window-seconds:900}")
+    private int registerWindowSeconds;
 
     @Override
-    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        if (!rateLimitingEnabled) {
+            return true;
+        }
         String clientIp = getClientIp(request);
         String requestPath = request.getRequestURI();
 
-        // Apply rate limiting to login endpoint
         if (requestPath.contains("/auth/login")) {
-            return checkRateLimit(request, response, rateLimitingConfig.getLoginBucket(clientIp), clientIp, "login");
+            return checkRateLimit(response, "login:" + clientIp,
+                    loginMaxRequests, loginWindowSeconds, "login", clientIp);
         }
 
-        // Apply rate limiting to register endpoint
         if (requestPath.contains("/auth/register")) {
-            return checkRateLimit(request, response, rateLimitingConfig.getRegisterBucket(clientIp), clientIp, "register");
+            return checkRateLimit(response, "register:" + clientIp,
+                    registerMaxRequests, registerWindowSeconds, "register", clientIp);
         }
 
         return true;
     }
 
-    /**
-     * Check if request is within rate limit
-     */
-    private boolean checkRateLimit(HttpServletRequest request, HttpServletResponse response, Bucket bucket,
-                                   String clientIp, String endpoint) throws Exception {
-        ConsumptionProbe probe = bucket.tryConsumeAndReturnRemaining(1);
+    private boolean checkRateLimit(HttpServletResponse response, String key,
+                                   int maxRequests, int windowSeconds,
+                                   String endpoint, String clientIp) {
+        RateLimitingService.RateLimitResult result =
+                rateLimitingService.check(key, maxRequests, windowSeconds);
 
-        if (probe.isConsumed()) {
-            // Request is allowed
-            response.addHeader("X-Rate-Limit-Remaining", String.valueOf(probe.getRemainingTokens()));
+        if (result.allowed()) {
+            response.addHeader("X-Rate-Limit-Remaining", String.valueOf(result.remaining()));
             return true;
-        } else {
-            // Rate limit exceeded
-            long waitForRefill = TimeUnit.NANOSECONDS.toSeconds(probe.getNanosToWaitForRefill());
-            response.setStatus(429); // SC_TOO_MANY_REQUESTS
-            response.setContentType("application/json");
-            response.getWriter().write(
-                    "{\"status\":429,\"message\":\"Too many " + endpoint + " attempts. Try again in " + waitForRefill + " seconds\"}"
-            );
-
-            log.warn("Rate limit exceeded for {} from IP: {}", endpoint, clientIp);
-            return false;
         }
+
+        long retryAfter = Math.max(result.retryAfterSeconds(), 1L);
+        response.setStatus(429); // SC_TOO_MANY_REQUESTS is not in all Servlet API versions
+        response.setHeader("Retry-After", String.valueOf(retryAfter));
+        response.setContentType("application/json");
+        try {
+            response.getWriter().write(
+                    "{\"status\":429,\"message\":\"Too many " + endpoint
+                            + " attempts. Try again in " + retryAfter + " seconds\"}");
+        } catch (java.io.IOException e) {
+            log.warn("Could not write rate-limit response for {}: {}", endpoint, e.getMessage());
+        }
+
+        log.warn("Rate limit exceeded for {} from IP: {}", endpoint, clientIp);
+        return false;
     }
 
-    /**
-     * Get client IP address from request (handles proxies)
-     */
+    /** Only trust the first proxy hop; X-Forwarded-For is appended by proxies. */
     private String getClientIp(HttpServletRequest request) {
         String xForwardedFor = request.getHeader("X-Forwarded-For");
-        if (xForwardedFor != null && !xForwardedFor.isEmpty()) {
+        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
             return xForwardedFor.split(",")[0].trim();
         }
-        return request.getRemoteAddr();
+        String remoteAddr = request.getRemoteAddr();
+        return remoteAddr != null ? remoteAddr : "unknown";
     }
-
 }

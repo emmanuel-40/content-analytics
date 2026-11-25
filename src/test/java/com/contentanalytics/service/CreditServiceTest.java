@@ -17,7 +17,6 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -76,39 +75,16 @@ class CreditServiceTest {
     }
 
     @Test
-    @DisplayName("optimistic lock conflict retries up to 3 times then succeeds")
-    void optimisticLockRetriesThenSucceeds() {
+    @DisplayName("lock conflict is not retried inside the same transaction")
+    void lockConflictIsNotRetriedInSameTransaction() {
         UUID userId = UUID.randomUUID();
-        Subscription sub = subscriptionWithCredits(10);
-
-        AtomicInteger callCount = new AtomicInteger(0);
-        when(subscriptionRepository.findByUserIdForUpdate(any(UUID.class)))
-                .thenAnswer(inv -> {
-                    callCount.incrementAndGet();
-                    if (callCount.get() < 3) {
-                        throw new org.springframework.dao.OptimisticLockingFailureException("conflict");
-                    }
-                    return Optional.of(sub);
-                });
-        when(subscriptionRepository.save(any(Subscription.class))).thenAnswer(inv -> inv.getArgument(0));
-
-        SubscriptionDto result = service.purchaseCredits(userId, 3, "ref-1");
-
-        assertThat(result.getAvailableCredits()).isEqualTo(13);
-        assertThat(callCount.get()).isEqualTo(3);
-    }
-
-    @Test
-    @DisplayName("optimistic lock conflict retries 3 times then throws")
-    void optimisticLockRetriesExhaustedThenThrows() {
-        UUID userId = UUID.randomUUID();
-        Subscription sub = subscriptionWithCredits(10);
 
         when(subscriptionRepository.findByUserIdForUpdate(any(UUID.class)))
                 .thenThrow(new org.springframework.dao.OptimisticLockingFailureException("conflict"));
 
         assertThatThrownBy(() -> service.purchaseCredits(userId, 3, "ref-1"))
                 .isInstanceOf(org.springframework.dao.OptimisticLockingFailureException.class);
+        verify(subscriptionRepository, times(1)).findByUserIdForUpdate(any(UUID.class));
     }
 
     @Test

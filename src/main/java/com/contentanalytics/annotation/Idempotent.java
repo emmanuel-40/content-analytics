@@ -9,7 +9,7 @@ import java.lang.annotation.Target;
  * Marks a controller method as idempotent: the client must supply an
  * {@code Idempotency-Key} header, and duplicate requests with the same key
  * within the TTL window return the cached response instead of re-executing.
- * 
+ *
  * Safe for: POST /api/payments/initialize, POST /api/subscription/purchase-credits,
  * any mutation where a client retry must not create a duplicate side effect.
  *

@@ -63,6 +63,25 @@ Then in a browser: click Continue with Google -> consent -> land on
 First sign-in with an unknown email creates a passwordless row; with a known
 local email it links and keeps the password (see `docs/AUTHENTICATION.md`).
 
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant API as Backend (Spring Security)
+  participant G as Google Accounts
+  participant SPA as Frontend SPA
+
+  B->>API: GET /oauth2/authorization/google
+  API-->>B: 302 Google consent screen
+  B->>G: approve (openid, email, profile)
+  G-->>B: 302 /login/oauth2/code/google?code&state
+  Note over G,API: redirect URI must EXACTLY match the registered URI (step 2)
+  B->>API: callback
+  API->>G: validate state, exchange code, fetch userinfo
+  G-->>API: email + verified flag
+  API-->>B: 302 FRONTEND_URL/auth/callback?status=success (cookies set)
+  B->>SPA: SPA reads status param, fetches /api/auth/providers and profile
+```
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |

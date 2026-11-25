@@ -3,7 +3,8 @@ package com.contentanalytics.service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -24,14 +25,17 @@ import static org.mockito.Mockito.*;
 @DisplayName("LoginAttemptService")
 class LoginAttemptServiceTest {
 
+    @Mock
     private StringRedisTemplate redis;
+
+    @Mock
     private ValueOperations<String, String> ops;
+
     private LoginAttemptService service;
 
     @BeforeEach
     void setUp() {
-        redis = mock(StringRedisTemplate.class);
-        ops = mock(ValueOperations.class);
+        MockitoAnnotations.openMocks(this);
         when(redis.opsForValue()).thenReturn(ops);
         service = new LoginAttemptService(redis);
         ReflectionTestUtils.setField(service, "maxAttempts", 3);

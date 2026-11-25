@@ -1,28 +1,34 @@
 package com.contentanalytics.service;
 
-import com.contentanalytics.entity.Document;
 import com.contentanalytics.entity.DocumentStatus;
 import com.contentanalytics.exception.InsufficientCreditsException;
-import com.contentanalytics.repository.DocumentRepository;
+import com.contentanalytics.service.DocumentService.ClaimedDocument;
+import com.contentanalytics.service.DocumentService.ProcessedDocument;
+import com.contentanalytics.service.JobQueue.DocumentJob;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.Objects;
 
+/**
+ * Document processing worker.
+ *
+ * All transports (in-process {@code @Async} and RabbitMQ) call {@link #processJob}, which is
+ * the single place where a failed attempt is retried. The listener only decides whether to
+ * ACK/NACK the broker delivery; it never retries on its own. A claim is taken through
+ * {@link DocumentService#claimForProcessing(java.util.UUID)} so duplicate deliveries are
+ * no-ops instead of double-processing the same document.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
-@Transactional
 public class DocumentProcessingService {
 
     private final WebSocketService webSocketService;
-    private final DocumentRepository documentRepository;
+    private final DocumentService documentService;
     private final FileExtractionService fileExtractionService;
     private final AiAnalysisService aiAnalysisService;
     private final CreditService creditService;
@@ -32,98 +38,92 @@ public class DocumentProcessingService {
      */
     private static final int AI_ANALYSIS_CREDIT_COST = 1;
 
+    /**
+     * Total attempts for one logical job, including the first delivery. Attempts are bounded
+     * here (not by broker redelivery) so a poison document ends in FAILED + DLQ, not a loop.
+     */
+    public static final int MAX_ATTEMPTS = 3;
+
     @Value("${app.anthropic.max-tokens:2048}")
     private int maxTokens;
 
-    /**
-     * Queue document for asynchronous processing.
-     * 
-     * This method is the async entry point and MUST be invoked through the Spring proxy
-     * (i.e. injected by another bean). Calling an {@code @Async} method from within the same
-     * bean bypasses the proxy and silently degrades to synchronous execution.
-     */
-    @Async
-    public void queueForProcessing(UUID documentId) {
-        log.info("Queuing document for processing: {}", documentId);
-        try {
-            processDocument(documentId);
-        } catch (Exception e) {
-            log.error("Error processing document: {}", documentId, e);
-            updateProcessingStatus(documentId, DocumentStatus.FAILED, 0f, e.getMessage());
-        }
+    public enum JobOutcome {
+        COMPLETED, FAILED
+    }
+
+    private enum AttemptResult {
+        DONE, RETRY, FAILED
     }
 
     /**
-     * Main document processing logic
-     * Basic analysis (word count, character count) always works
-     * AI analysis (Claude) is optional and gracefully degraded if disabled
+     * In-process entry point. Must be invoked through the Spring proxy so {@code @Async}
+     * actually applies.
      */
-    private void processDocument(UUID documentId) {
-        log.info("Starting processing for document: {}", documentId);
+    @Async
+    public void processJobAsync(DocumentJob job) {
+        processJob(job);
+    }
 
-        Document document = documentRepository.findById(documentId)
-                .orElseThrow(() -> new RuntimeException("Document not found: " + documentId));
+    /**
+     * The one guarded retry path shared by every queue implementation.
+     */
+    public JobOutcome processJob(DocumentJob job) {
+        Objects.requireNonNull(job, "job");
+        int firstAttempt = Math.max(1, job.attempt());
 
-        // Idempotent consume: already finished or already in flight (duplicate queue delivery)
-        if (document.getStatus() == DocumentStatus.COMPLETED) {
-            log.info("Document {} already COMPLETED — skipping duplicate job", documentId);
-            return;
+        for (int attempt = firstAttempt; attempt <= MAX_ATTEMPTS; attempt++) {
+            AttemptResult result = attemptProcessing(job.documentId(), job.jobId(), attempt);
+            if (result == AttemptResult.DONE) {
+                return JobOutcome.COMPLETED;
+            }
+            if (result == AttemptResult.FAILED) {
+                return JobOutcome.FAILED;
+            }
+            log.warn("Retrying document job {} (document {}) - attempt {}/{}",
+                    job.jobId(), job.documentId(), attempt + 1, MAX_ATTEMPTS);
         }
-        if (document.getStatus() == DocumentStatus.PROCESSING) {
-            log.info("Document {} already PROCESSING — skipping duplicate job", documentId);
-            return;
+        return JobOutcome.FAILED;
+    }
+
+    /**
+     * Execute one attempt. Returns DONE for a successful or already-finished job, RETRY for
+     * a transient failure with budget left, and FAILED when the terminal state is persisted.
+     */
+    private AttemptResult attemptProcessing(java.util.UUID documentId,
+                                            java.util.UUID jobId, int attempt) {
+        ClaimedDocument document = documentService.claimForProcessing(documentId);
+        if (document == null) {
+            // Another worker owns it, or it is already COMPLETED: duplicate delivery.
+            log.info("Skipping duplicate/finished document job {} for document {}", jobId, documentId);
+            return AttemptResult.DONE;
         }
 
-        UUID userId = document.getUser().getId();
+        long startTime = System.currentTimeMillis();
 
         try {
-            long startTime = System.currentTimeMillis();
-            // Step 1: Update status to PROCESSING
-            updateProcessingStatus(documentId, DocumentStatus.PROCESSING, 10f, null);
-            webSocketService.sendDocumentProgress(userId, documentId, document.getFileName(), 10f, "PROCESSING", "extracting_text");
+            webSocketService.sendDocumentProgress(document.userId(), document.id(), document.fileName(),
+                    10f, "PROCESSING", "extracting_text");
 
-            // Step 2: Extract text from file
-            log.debug("Extracting text from document: {}", documentId);
-            String extractedText = fileExtractionService.extractText(document.getFileKey(), document.getMimeType());
-
+            String extractedText = fileExtractionService.extractText(document.fileKey(), document.mimeType());
             if (extractedText == null || extractedText.isBlank()) {
-                throw new RuntimeException("Failed to extract text from document");
+                throw new IllegalStateException("Failed to extract text from document");
             }
 
-            updateProcessingStatus(documentId, DocumentStatus.PROCESSING, 30f, null);
-            webSocketService.sendDocumentProgress(userId, documentId, document.getFileName(), 30f, "PROCESSING", "analyzing");
-            log.debug("Text extracted. Length: {} characters", extractedText.length());
+            requireTransition(documentService.updateProcessingStatus(
+                    documentId, DocumentStatus.PROCESSING, 30f, null), documentId, DocumentStatus.PROCESSING);
+            webSocketService.sendDocumentProgress(document.userId(), document.id(), document.fileName(),
+                    30f, "PROCESSING", "analyzing");
 
-            // Step 3: Basic Analysis (ALWAYS works - no Claude needed)
-            log.debug("Performing basic analysis for document: {}", documentId);
             int wordCount = countWords(extractedText);
             int charCount = extractedText.length();
 
-            document.setExtractedText(extractedText);
-            document.setWordCount(wordCount);
-            document.setCharacterCount(charCount);
-
-            log.debug("Basic analysis complete - Words: {}, Characters: {}", wordCount, charCount);
-
-            // Step 4: AI Analysis (OPTIONAL - only if Claude enabled)
+            // AI analysis is optional; basic analysis always succeeds. Credits are charged
+            // idempotently per document, so a retry after a failed AI call is not double-billed.
             DocumentAnalysisResult analysis = null;
-
             if (aiAnalysisService.isEnabled()) {
-                // Charge before work. consumeCredits is idempotent per documentId, so a
-                // retry after a prior charge (but failed AI call) does not debit again.
                 try {
-                    creditService.consumeCredits(userId, AI_ANALYSIS_CREDIT_COST, documentId);
-                    log.debug("Analysing document via AI provider '{}': {}", documentId,
-                            aiAnalysisService.getActiveProvider());
+                    creditService.consumeCredits(document.userId(), AI_ANALYSIS_CREDIT_COST, documentId);
                     analysis = aiAnalysisService.analyze(extractedText);
-
-                    if (analysis != null) {
-                        document.setSummary(analysis.getSummary());
-                        document.setKeyTopics(analysis.getKeyTopics());
-                        document.setSentiment(analysis.getSentiment());
-                        document.setConfidenceScore(analysis.getConfidenceScore());
-                        log.debug("AI analysis complete for document: {}", documentId);
-                    }
                 } catch (InsufficientCreditsException e) {
                     log.warn("No credits available for document {}, continuing with basic analysis: {}",
                             documentId, e.getMessage());
@@ -131,115 +131,73 @@ public class DocumentProcessingService {
                     log.warn("AI analysis failed for document {}, continuing with basic analysis: {}",
                             documentId, e.getMessage());
                 }
-            } else {
-                log.debug("No AI provider available, skipping AI analysis for document: {}", documentId);
             }
 
-            updateProcessingStatus(documentId, DocumentStatus.PROCESSING, 70f, null);
-            webSocketService.sendDocumentProgress(userId, documentId, document.getFileName(), 70f, "PROCESSING", "saving_results");
+            requireTransition(documentService.updateProcessingStatus(
+                    documentId, DocumentStatus.PROCESSING, 70f, null), documentId, DocumentStatus.PROCESSING);
+            webSocketService.sendDocumentProgress(document.userId(), document.id(), document.fileName(),
+                    70f, "PROCESSING", "saving_results");
 
-            // Step 5: Mark COMPLETED (with or without AI analysis)
-            document.setStatus(DocumentStatus.COMPLETED);
-            document.setProcessingProgress(100f);
-            document.setProcessingCompletedAt(java.time.LocalDateTime.now());
+            ProcessedDocument result = new ProcessedDocument(
+                    extractedText,
+                    wordCount,
+                    charCount,
+                    analysis != null ? analysis.getSummary() : null,
+                    analysis != null ? analysis.getKeyTopics() : null,
+                    analysis != null ? analysis.getSentiment() : null,
+                    analysis != null ? analysis.getConfidenceScore() : null
+            );
 
-            documentRepository.save(document);
-
-            // Send completion update
-            long processingTime = System.currentTimeMillis() - startTime;
-
-            // AFTER (CORRECT):
-            String summary = analysis != null ? analysis.getSummary() : null;
-            String topics = null;
-            if (analysis != null && analysis.getKeyTopics() != null) {
-                topics = String.join(",", analysis.getKeyTopics());  // ← Convert List to comma-separated String
+            // The DB status is committed inside completeProcessing before the notification
+            // is sent, so clients never see COMPLETED before it is durable.
+            boolean persisted = documentService.completeProcessing(documentId, result);
+            if (!persisted) {
+                log.warn("Document {} was no longer PROCESSING when results were saved - "
+                        + "skipping completion notification", documentId);
+                return AttemptResult.DONE;
             }
-            String sentiment = analysis != null ? analysis.getSentiment() : null;
-            Float confidenceScore = analysis != null ? analysis.getConfidenceScore() : null;
 
             webSocketService.sendDocumentCompleted(
-                    userId,
-                    documentId,
-                    document.getFileName(),
-                    summary,
-                    topics,  // ← Now it's String!
-                    sentiment,
-                    confidenceScore,
-                    document.getWordCount(),
-                    processingTime
+                    document.userId(),
+                    document.id(),
+                    document.fileName(),
+                    result.summary(),
+                    result.keyTopics(),
+                    result.sentiment(),
+                    result.confidenceScore(),
+                    result.wordCount(),
+                    System.currentTimeMillis() - startTime
             );
 
-            log.info("Document processing completed successfully: {}", documentId);
+            log.info("Document processing completed successfully: {} (job {})", documentId, jobId);
+            return AttemptResult.DONE;
 
         } catch (Exception e) {
-            log.error("Error during document processing: {}", documentId, e);
-            updateProcessingStatus(documentId, DocumentStatus.FAILED, 0f, e.getMessage());
+            log.error("Attempt {}/{} failed for document {} (job {})",
+                    attempt, MAX_ATTEMPTS, documentId, jobId, e);
 
-            webSocketService.sendDocumentFailed(
-                    userId,
-                    documentId,
-                    document.getFileName(),
-                    e.getMessage(),
-                    "PROCESSING_ERROR"
-            );
+            if (attempt < MAX_ATTEMPTS) {
+                // Make the row claimable again for the next attempt.
+                documentService.resetForRetry(documentId, e.getMessage());
+                return AttemptResult.RETRY;
+            }
+
+            if (documentService.failProcessing(documentId, e.getMessage())) {
+                webSocketService.sendDocumentFailed(
+                        document.userId(), document.id(), document.fileName(),
+                        e.getMessage(), "PROCESSING_ERROR");
+            } else {
+                log.warn("Document {} was not PROCESSING at final failure - no notification sent",
+                        documentId);
+            }
+            return AttemptResult.FAILED;
         }
     }
 
-    /**
-     * Update document processing status
-     */
-    private void updateProcessingStatus(UUID documentId, DocumentStatus status, Float progress, String error) {
-        Document document = documentRepository.findById(documentId)
-                .orElse(null);
-
-        if (document == null) {
-            log.warn("Document not found for status update: {}", documentId);
-            return;
-        }
-
-        document.setStatus(status);
-        document.setProcessingProgress(progress);
-
-        if (status == DocumentStatus.PROCESSING && document.getProcessingStartedAt() == null) {
-            document.setProcessingStartedAt(java.time.LocalDateTime.now());
-        }
-
-        if (status == DocumentStatus.COMPLETED) {
-            document.setProcessingCompletedAt(java.time.LocalDateTime.now());
-        }
-
-        if (error != null) {
-            document.setProcessingError(error);
-        }
-
-        documentRepository.save(document);
-        log.debug("Document {} status updated to: {} (progress: {}%)", documentId, status, progress);
-    }
-
-    /**
-     * Retry processing for a failed document.
-     * 
-     * Async entry point - must be called through the Spring proxy.
-     */
-    @Async
-    public void retryDocumentProcessing(UUID documentId) {
-        log.info("Retrying processing for document: {}", documentId);
-
-        Document document = documentRepository.findById(documentId)
-                .orElseThrow(() -> new RuntimeException("Document not found: " + documentId));
-
-        // Reset status
-        document.setStatus(DocumentStatus.UPLOADED);
-        document.setProcessingProgress(0f);
-        document.setProcessingError(null);
-        documentRepository.save(document);
-
-        // Process again - direct call is safe now that this method is already async
-        try {
-            processDocument(documentId);
-        } catch (Exception e) {
-            log.error("Error retrying document: {}", documentId, e);
-            updateProcessingStatus(documentId, DocumentStatus.FAILED, 0f, e.getMessage());
+    private void requireTransition(boolean applied, java.util.UUID documentId, DocumentStatus expected) {
+        if (!applied) {
+            throw new IllegalStateException(
+                    "Document " + documentId + " is no longer in state " + expected);
         }
     }
 
@@ -254,4 +212,3 @@ public class DocumentProcessingService {
     }
 
 }
-

@@ -1,115 +1,91 @@
 package com.contentanalytics.service;
 
+import com.contentanalytics.entity.EmailOutbox;
+import com.contentanalytics.entity.EmailType;
+import com.contentanalytics.repository.EmailOutboxRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import okhttp3.*;
 
-import java.io.IOException;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.UUID;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
+/**
+ * Entry point for all outbound email.
+ *
+ * Nothing here performs network I/O. Each request writes one row to the transactional
+ * outbox inside the caller's database transaction; the publisher/worker deliver it later.
+ * This makes email atomic with the state change that requested it and makes retries safe.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class EmailService {
 
-    @Value("${app.brevo.api-key}")
-    private String brevoApiKey;
-
-    @Value("${app.brevo.api-url:https://api.brevo.com/v3}")
-    private String brevoApiUrl;
-
-    @Value("${app.email.from-address}")
-    private String fromAddress;
-
-    @Value("${app.email.from-name:Content Analytics}")
-    private String fromName;
-
-    private final OkHttpClient httpClient = new OkHttpClient();
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final EmailOutboxRepository emailOutboxRepository;
 
     public void sendEmailVerificationLink(String userEmail, String userName, String verificationLink) {
-        log.info("Sending email verification to: {}", userEmail);
-
-        String subject = "Verify Your Email Address";
-        String htmlContent = buildEmailVerificationTemplate(userName, verificationLink);
-
-        sendEmail(userEmail, subject, htmlContent);
+        enqueue(EmailType.EMAIL_VERIFICATION, userEmail, userName,
+                "Verify Your Email Address",
+                buildEmailVerificationTemplate(userName, verificationLink),
+                verificationLink);
     }
 
     public void sendPasswordResetLink(String userEmail, String userName, String resetLink) {
-        log.info("Sending password reset link to: {}", userEmail);
-
-        String subject = "Reset Your Password";
-        String htmlContent = buildPasswordResetTemplate(userName, resetLink);
-
-        sendEmail(userEmail, subject, htmlContent);
+        enqueue(EmailType.PASSWORD_RESET, userEmail, userName,
+                "Reset Your Password",
+                buildPasswordResetTemplate(userName, resetLink),
+                resetLink);
     }
 
     public void sendWelcomeEmail(String userEmail, String userName) {
-        log.info("Sending welcome email to: {}", userEmail);
-
-        String subject = "Welcome to Content Analytics Platform";
-        String htmlContent = buildWelcomeTemplate(userName);
-
-        sendEmail(userEmail, subject, htmlContent);
+        enqueue(EmailType.WELCOME, userEmail, userName,
+                "Welcome to Content Analytics Platform",
+                buildWelcomeTemplate(userName),
+                userEmail);
     }
 
     public void sendNotificationEmail(String userEmail, String subject, String htmlContent) {
-        log.info("Sending notification email to: {}", userEmail);
-        sendEmail(userEmail, subject, htmlContent);
+        sendNotificationEmail(userEmail, subject, htmlContent, UUID.randomUUID().toString());
     }
 
-    private void sendEmail(String toEmail, String subject, String htmlContent) {
-        try {
-            Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("subject", subject);
+    /**
+     * Use a caller-supplied event id (for example userId:tokenVersion) when the same
+     * notification must never be emitted twice for one state transition.
+     */
+    public void sendNotificationEmail(String userEmail, String subject, String htmlContent,
+                                       String eventId) {
+        enqueue(EmailType.NOTIFICATION, userEmail, null,
+                subject,
+                htmlContent,
+                eventId);
+    }
 
-            Map<String, Object> sender = new HashMap<>();
-            sender.put("email", fromAddress);
-            sender.put("name", fromName);
-            requestBody.put("sender", sender);
+    /**
+     * Atomic, duplicate-safe outbox write. The unique dedupe key is derived from the
+     * logical artifact (token, account, event), not from a random job id, so two callers
+     * asking for the same email collapse into one row.
+     */
+    private void enqueue(EmailType type, String recipient, String displayName,
+                         String subject, String htmlContent, String uniquePart) {
+        String dedupeKey = type.name() + ":" + UUID.nameUUIDFromBytes(
+                String.valueOf(uniquePart).getBytes(StandardCharsets.UTF_8));
 
-            Map<String, Object> to = new HashMap<>();
-            to.put("email", toEmail);
+        int inserted = emailOutboxRepository.insertIfAbsent(
+                UUID.randomUUID(),
+                dedupeKey,
+                type.name(),
+                recipient,
+                displayName,
+                subject,
+                htmlContent,
+                LocalDateTime.now());
 
-            requestBody.put("to", List.of(to));
-
-            requestBody.put("htmlContent", htmlContent);
-
-            String jsonBody = objectMapper.writeValueAsString(requestBody);
-
-            RequestBody body = RequestBody.create(
-                    jsonBody,
-                    MediaType.get("application/json")
-            );
-
-            Request request = new Request.Builder()
-                    .url(brevoApiUrl + "/smtp/email")
-                    .addHeader("api-key", brevoApiKey)
-                    .addHeader("content-type", "application/json")
-                    .post(body)
-                    .build();
-
-            try (Response response = httpClient.newCall(request).execute()) {
-
-                if (!response.isSuccessful()) {
-                    String errorBody = response.body() != null ? response.body().string() : "Unknown error";
-                    log.error("Brevo API error: {} - {}", response.code(), errorBody);
-                    throw new RuntimeException("Failed to send email: " + response.code());
-                }
-
-                log.info("Email sent successfully to: {}", toEmail);
-            }
-
-        } catch (IOException e) {
-            log.error("Error sending email to: {}", toEmail, e);
-            throw new RuntimeException("Failed to send email", e);
+        if (inserted == 0) {
+            log.debug("Duplicate email suppressed ({}): {}", type, dedupeKey);
+        } else {
+            log.info("Email queued ({}) for {}", type, recipient);
         }
     }
 

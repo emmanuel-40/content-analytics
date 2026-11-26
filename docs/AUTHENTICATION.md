@@ -18,8 +18,9 @@ cookie jar knows or cares which one was used.
 ## Password flow
 
 1. `POST /api/auth/register` creates a `LOCAL` user with `emailVerified=false` and
-   sends a Brevo verification link (`FRONTEND_URL` from `application.properties`
-   locally, Render env var in prod).
+   writes a deduplicated verification email row to `email_outbox` in the **same**
+   transaction (`FRONTEND_URL` from `application.properties` locally, Render env
+   var in prod). The publisher hands it to RabbitMQ, which delivers through Brevo.
 2. `GET /api/auth/verify-email?token=...` flips the flag.
 3. `POST /api/auth/login` checks the flag, then the bcrypt hash, then mints
    access (15 min) + refresh (7 days) JWTs into HttpOnly cookies via
@@ -172,7 +173,8 @@ aliasing, a compromised recovery address, or a bug). Raises
 
 - `config/SecurityConfig.java` - JWT filter + `oauth2Login` wiring, public matchers
   for `/api/auth/providers`, `/oauth2/**`, `/login/oauth2/**`.
-- `security/GoogleOAuth2UserService.java` - verified-email gate, delegates to provisioner.
+- `security/GoogleOAuth2UserService.java` / `security/GoogleOidcUserService.java` -
+  verified-email gate for the plain OAuth2 and OIDC paths; both delegate to provisioner.
 - `service/OAuthAccountProvisioner.java` - the three linking outcomes.
 - `security/OAuth2LoginSuccessHandler.java` / `OAuth2LoginFailureHandler.java` -
   cookies + redirect / fixed reason vocabulary.

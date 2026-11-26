@@ -37,7 +37,7 @@ public class GoogleOAuth2UserService implements OAuth2UserService<OAuth2UserRequ
     /** Our own username, carried from the provisioner to the success handler. */
     static final String ATTR_USERNAME = "username";
 
-    private static final String CLAIM_SUBJECT = "sub";
+    static final String CLAIM_SUBJECT = "sub";
     private static final String CLAIM_EMAIL = "email";
     private static final String CLAIM_EMAIL_VERIFIED = "email_verified";
     private static final String CLAIM_GIVEN_NAME = "given_name";
@@ -49,8 +49,23 @@ public class GoogleOAuth2UserService implements OAuth2UserService<OAuth2UserRequ
     @Override
     public OAuth2User loadUser(OAuth2UserRequest userRequest) {
         OAuth2User googleUser = delegate.loadUser(userRequest);
-        Map<String, Object> claims = googleUser.getAttributes();
+        User user = provisionFromClaims(googleUser.getAttributes());
 
+        // Copy the claims and stamp our own identifiers on top. Google never uses these
+        // two keys, so there is no chance of overwriting a claim we later depend on.
+        Map<String, Object> attributes = new HashMap<>(googleUser.getAttributes());
+        attributes.put(ATTR_USER_ID, user.getId().toString());
+        attributes.put(ATTR_USERNAME, user.getUsername());
+
+        return new DefaultOAuth2User(googleUser.getAuthorities(), attributes, CLAIM_SUBJECT);
+    }
+
+    /**
+     * Shared find-or-create policy for both the plain OAuth2 and OIDC user services.
+     * Google's standard registration requests {@code openid}, so the OIDC path is the
+     * one that normally runs; keeping this policy in one place avoids drift.
+     */
+    User provisionFromClaims(Map<String, Object> claims) {
         String subject = required(claims, CLAIM_SUBJECT);
         String email = required(claims, CLAIM_EMAIL);
 
@@ -62,9 +77,8 @@ public class GoogleOAuth2UserService implements OAuth2UserService<OAuth2UserRequ
             throw error("invalid_email", "Google did not verify this email address");
         }
 
-        User user;
         try {
-            user = provisioner.provisionGoogleAccount(
+            return provisioner.provisionGoogleAccount(
                     subject,
                     email,
                     text(claims, CLAIM_GIVEN_NAME),
@@ -73,14 +87,6 @@ public class GoogleOAuth2UserService implements OAuth2UserService<OAuth2UserRequ
             log.warn("Google account linking refused for {}: {}", email, ex.getMessage());
             throw error("account_link_conflict", ex.getMessage());
         }
-
-        // Copy the claims and stamp our own identifiers on top. Google never uses these
-        // two keys, so there is no chance of overwriting a claim we later depend on.
-        Map<String, Object> attributes = new HashMap<>(claims);
-        attributes.put(ATTR_USER_ID, user.getId().toString());
-        attributes.put(ATTR_USERNAME, user.getUsername());
-
-        return new DefaultOAuth2User(googleUser.getAuthorities(), attributes, CLAIM_SUBJECT);
     }
 
     private String required(Map<String, Object> claims, String key) {

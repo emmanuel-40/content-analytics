@@ -65,9 +65,13 @@ proprietary license and security scheme.
 
 ## Documents
 
-Upload (multipart), list (paged), download (streams through the API - the bucket stays
-private), delete, analysis results. Async analysis jobs run in-process locally;
-set `app.queue.type=rabbitmq` + local RabbitMQ to exercise the queue path.
+Upload (multipart), list (paged), delete, analysis results and a generated text
+report. The original upload is deleted after successful analysis, so the private
+bucket is only used during processing and downloads never read from storage.
+Document analysis jobs run on RabbitMQ by default; `app.queue.type=async` switches
+to the in-process fallback. Verification/reset/welcome/notification emails are
+queued in the transactional `email_outbox` table and delivered through the same
+broker, so a provider outage cannot roll back registration or send a link twice.
 
 ## Health metrics
 

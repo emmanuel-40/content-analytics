@@ -5,6 +5,7 @@ import com.contentanalytics.service.DocumentService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -31,7 +32,7 @@ public class DocumentController {
      * Upload a document for analysis
      *
      * Multipart form data:
-     * - file: PDF, TXT, DOCX, PPTX (max 50MB)
+     * - file: PDF, TXT, DOCX, PPTX (max 10MB)
      * - description: (optional) description of document
      *
      * Response: DocumentResponseDto with status UPLOADED
@@ -207,37 +208,37 @@ public class DocumentController {
     }
 
     /**
-     * GET /api/documents/{documentId}/download
-     * Stream the original document file back to the client.
+     * GET /api/documents/{documentId}/report
+     * Generate a text report from the saved analysis results.
      *
-     * Path parameters:
-     * - documentId: UUID of document to download
+     * The original upload is deleted after processing, so this endpoint never
+     * reads from the storage bucket.
      *
-     * Response: 200 with the raw file as an attachment, or 404 if the document
-     * does not exist or is not owned by the caller.
+     * Response: 200 with the report as an attachment, 404 if the document is not
+     * owned by the caller, or 400 if analysis has not completed yet.
      */
-    @GetMapping("/{documentId}/download")
-    public ResponseEntity<Resource> downloadDocument(
+    @GetMapping("/{documentId}/report")
+    public ResponseEntity<Resource> downloadAnalysisReport(
             @PathVariable UUID documentId) {
 
         UUID userId = getCurrentUserId();
-        log.info("Download request for document: {} from user: {}", documentId, userId);
+        log.info("Report download request for document: {} from user: {}", documentId, userId);
 
-        // Verifies ownership before returning any bytes
-        DownloadFileDto download = documentService.getDocumentForDownload(documentId, userId);
+        AnalysisReportDto report = documentService.generateAnalysisReport(documentId, userId);
+        byte[] content = report.getContent().getBytes(StandardCharsets.UTF_8);
 
         // Encode the filename so non-ASCII names survive the Content-Disposition header
-        String encodedFileName = URLEncoder.encode(download.getFileName(), StandardCharsets.UTF_8)
+        String encodedFileName = URLEncoder.encode(report.getFileName(), StandardCharsets.UTF_8)
                 .replace("+", "%20");
 
-        String contentDisposition = "attachment; filename=\"" + download.getFileName() + "\"; "
+        String contentDisposition = "attachment; filename=\"" + report.getFileName() + "\"; "
                 + "filename*=UTF-8''" + encodedFileName;
 
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, contentDisposition)
-                .header(HttpHeaders.CONTENT_TYPE, download.getContentType())
-                .contentLength(download.getSize() != null ? download.getSize() : 0L)
-                .body(download.getResource());
+                .header(HttpHeaders.CONTENT_TYPE, report.getContentType())
+                .contentLength(content.length)
+                .body(new ByteArrayResource(content));
     }
 
     /**

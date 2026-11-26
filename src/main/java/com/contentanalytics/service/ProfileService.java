@@ -351,16 +351,14 @@ public class ProfileService {
 
         log.info("Password changed successfully for user: {}", userId);
 
-        // Send notification email
-        try {
-            emailService.sendNotificationEmail(
-                    user.getEmail(),
-                    "Your Password Has Been Changed",
-                    buildPasswordChangeEmailTemplate(user.getFirstName() != null ? user.getFirstName() : user.getUsername())
-            );
-        } catch (Exception e) {
-            log.error("Failed to send password change notification email", e);
-        }
+        // Queue the notification inside this transaction. The token version was just
+        // bumped, so one password change can never emit two notifications.
+        emailService.sendNotificationEmail(
+                user.getEmail(),
+                "Your Password Has Been Changed",
+                buildPasswordChangeEmailTemplate(user.getFirstName() != null ? user.getFirstName() : user.getUsername()),
+                "password-changed:" + userId + ":" + user.getTokenVersion()
+        );
     }
 
     /**

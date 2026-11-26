@@ -3,6 +3,7 @@ package com.contentanalytics.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
+import org.springframework.data.domain.Persistable;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -33,10 +34,15 @@ import java.util.UUID;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class RefreshToken {
+public class RefreshToken implements Persistable<UUID> {
 
+    /**
+     * The id is assigned by the caller so a rotation can write the successor id
+     * onto the old row in the same transaction. Spring Data's save() would treat
+     * any non-null id as detached and try to merge it; Persistable lets us keep
+     * the explicit id and still get a plain INSERT for a new row.
+     */
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
@@ -82,6 +88,25 @@ public class RefreshToken {
     /** Id of the refresh token that replaced this one after a successful rotation. */
     @Column(name = "replaced_by")
     private UUID replacedBy;
+
+    @Transient
+    @Builder.Default
+    private boolean newEntity = true;
+
+    @Override
+    public UUID getId() {
+        return id;
+    }
+
+    @Override
+    public boolean isNew() {
+        return newEntity;
+    }
+
+    @PostLoad
+    void markPersisted() {
+        this.newEntity = false;
+    }
 
     public void markUsed(LocalDateTime at, UUID replacementId) {
         this.status = RefreshTokenStatus.USED;

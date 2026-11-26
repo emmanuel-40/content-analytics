@@ -69,6 +69,29 @@ class RefreshTokenClaimTest {
     }
 
     @Test
+    @DisplayName("repository.save with a caller-assigned id inserts a new token")
+    void saveWithAssignedIdInserts() {
+        UUID id = UUID.randomUUID();
+        String hash = "9".repeat(64);
+
+        RefreshToken saved = refreshTokenRepository.save(RefreshToken.builder()
+                .id(id)
+                .user(user)
+                .tokenHash(hash)
+                .familyId(UUID.randomUUID())
+                .status(RefreshTokenStatus.ACTIVE)
+                .used(false)
+                .revoked(false)
+                .expiresAt(LocalDateTime.now().plusDays(7))
+                .build());
+        em.flush();
+        em.clear();
+
+        assertThat(saved.getId()).isEqualTo(id);
+        assertThat(refreshTokenRepository.findById(id)).isPresent();
+    }
+
+    @Test
     @DisplayName("the first claim wins, records the replacement and every later claim fails")
     void claimIsSingleUse() {
         String hash = "a".repeat(64);
@@ -140,6 +163,7 @@ class RefreshTokenClaimTest {
 
     private RefreshToken row(String hash, UUID familyId, LocalDateTime expiry) {
         return RefreshToken.builder()
+                .id(UUID.randomUUID())
                 .user(user)
                 .tokenHash(hash)
                 .familyId(familyId)

@@ -32,11 +32,19 @@ public class DocumentProcessingService {
     private final FileExtractionService fileExtractionService;
     private final AiAnalysisService aiAnalysisService;
     private final CreditService creditService;
+    private final StorageService storageService;
 
     /**
      * Credits charged for a single AI analysis.
      */
     private static final int AI_ANALYSIS_CREDIT_COST = 1;
+
+    /**
+     * Only a bounded prefix of extracted text is persisted. Counts use the full text and
+     * Gemini uses its own 10k-character prompt limit, so storing more provides no benefit
+     * and quickly eats the Supabase Postgres quota.
+     */
+    private static final int MAX_STORED_EXTRACTED_CHARS = 20000;
 
     /**
      * Total attempts for one logical job, including the first delivery. Attempts are bounded
@@ -139,7 +147,7 @@ public class DocumentProcessingService {
                     70f, "PROCESSING", "saving_results");
 
             ProcessedDocument result = new ProcessedDocument(
-                    extractedText,
+                    truncateForStorage(extractedText),
                     wordCount,
                     charCount,
                     analysis != null ? analysis.getSummary() : null,
@@ -156,6 +164,11 @@ public class DocumentProcessingService {
                         + "skipping completion notification", documentId);
                 return AttemptResult.DONE;
             }
+
+            // Results are durable. Remove the source file now so the storage bucket is not
+            // charged for every upload forever. On failure the cleanup flag stays false and
+            // DocumentSourceCleanupScheduler retries without disturbing this job outcome.
+            deleteStoredSourceFile(document);
 
             webSocketService.sendDocumentCompleted(
                     document.userId(),
@@ -191,6 +204,26 @@ public class DocumentProcessingService {
                         documentId);
             }
             return AttemptResult.FAILED;
+        }
+    }
+
+    private String truncateForStorage(String text) {
+        if (text == null || text.length() <= MAX_STORED_EXTRACTED_CHARS) {
+            return text;
+        }
+        return text.substring(0, MAX_STORED_EXTRACTED_CHARS) + "\n[truncated for storage]";
+    }
+
+    private void deleteStoredSourceFile(ClaimedDocument document) {
+        try {
+            storageService.deleteFile(document.fileKey());
+            documentService.markSourceFileDeleted(document.id());
+            log.info("Source file removed after analysis: {} (document {})",
+                    document.fileKey(), document.id());
+        } catch (RuntimeException e) {
+            log.error("Analysis completed but source file cleanup failed: {} (document {}) "
+                            + "- the cleanup scheduler will retry",
+                    document.fileKey(), document.id(), e);
         }
     }
 

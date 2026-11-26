@@ -17,14 +17,17 @@ flowchart TB
   Brevo[Brevo email]
   Gemini[Gemini AI]
   Paystack[Paystack]
+  CloudAMQP[CloudAMQP<br/>durable jobs + email]
 
   Browser -->|HTTPS REST + STOMP /ws| Render
   Browser -->|authorization code| Google
   Google -->|redirect + userinfo| Render
-  Render -->|Flyway V1-V18| SupaDB
+  Render -->|Flyway V1-V20| SupaDB
   Render -->|cache, rate limits, idempotency| Upstash
-  Render -->|signed downloads| SupaStore
-  Render -->|verification + reset mail| Brevo
+  Render -->|temporary upload storage + cleanup| SupaStore
+  Render -->|publish document + email jobs| CloudAMQP
+  CloudAMQP -->|consume and settle| Render
+  Render -->|outbox -> queue -> Brevo| Brevo
   Render -->|document analysis| Gemini
   Render -->|initialize + server-side verify| Paystack
   Paystack -->|HMAC-signed webhook| Render
@@ -50,6 +53,9 @@ flowchart TB
     create **S3 Access Keys**; Storage -> New bucket (PRIVATE, e.g. `content-analytics`).
     Endpoint: `https://<PROJECTREF>.supabase.co/storage/v1/s3`, path-style forced on.
 - **Upstash Redis**: free tier, copy host/port/password.
+- **CloudAMQP**: free "Lemur" plan is enough to start. Copy the `amqps://user:pass@host:port/vhost`
+  URL into `RABBITMQ_URL`. The app declares two durable queues (`document-processing`,
+  `email-delivery`) plus their dead-letter queues on boot.
 - **Brevo**: free 300/day; sender address verified; API key.
 - **Gemini** (optional): AI Studio key; without it analysis falls back to basic.
 
@@ -74,6 +80,9 @@ DB_POOL_SIZE=4
 REDIS_HOST=<upstash host>
 REDIS_PORT=6379
 REDIS_PASSWORD=<upstash password>
+RABBITMQ_URL=amqps://user:pass@host:port/vhost
+# APP_QUEUE_TYPE defaults to rabbitmq. Only set APP_QUEUE_TYPE=async as a temporary
+# fallback while the broker is down: outbox rows stay durable until it returns.
 JWT_SECRET=<openssl rand -base64 64, MUST be 64+ bytes>
 FRONTEND_URL=https://<your-frontend>
 CORS_ALLOWED_ORIGINS=https://<your-frontend>
@@ -121,10 +130,11 @@ which is why the prod file pins `server.forward-headers-strategy=framework`
 
 ## 5. Deploy and verify
 
-1. Deploy; Flyway runs all migrations on boot through `V18` (validate mode - the
+1. Deploy; Flyway runs all migrations on boot through `V20` (validate mode - the
    schema must migrate, never be created by Hibernate). `V16` adds server-side
    refresh-token rotation; `V17` adds the document optimistic-lock column;
-   `V18` renames the payment amount to USD cents. The
+   `V18` renames the payment amount to USD cents; `V19` tracks source-file cleanup;
+   `V20` adds the transactional email outbox. The
    migrations are Postgres-specific; the opt-in `FlywayMigrationTest` (see
    `docs/DEVELOPMENT.md`) validates them against a real Postgres before release.
 2. `GET https://<backend>/actuator/health` -> UP (sub-checks: db, redis, diskSpace), or

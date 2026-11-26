@@ -74,6 +74,19 @@ public class PaystackProvider implements PaymentProvider {
                 String body = response.body() != null ? response.body().string() : "";
                 if (!response.isSuccessful()) {
                     log.error("Paystack initialize failed: {} - {}", response.code(), body);
+                    String code = "";
+                    try {
+                        code = objectMapper.readTree(body).path("code").asText("");
+                    } catch (IOException parseFailure) {
+                        log.debug("Could not parse Paystack error body", parseFailure);
+                    }
+                    if ("unsupported_currency".equals(code)) {
+                        // The integration is valid, but the merchant account has not
+                        // been enabled for USD. This is actionable by the owner, so
+                        // surface it instead of hiding it behind a generic 500.
+                        throw new IllegalArgumentException(
+                                "USD is not enabled on this Paystack account. Enable USD in Paystack settings, then retry.");
+                    }
                     throw new IllegalStateException("Payment provider error (" + response.code() + ")");
                 }
                 JsonNode data = objectMapper.readTree(body).path("data");

@@ -50,9 +50,9 @@ Paystack webhook, never from a browser callback alone.
 
 Monolith layout: **controllers → services → JPA repositories → PostgreSQL**.
 Redis backs cache, login lockout, idempotency keys, and atomic rate-limit
-counters. Document analysis runs async (`@Async` or RabbitMQ). Auth is one JWT
-cookie path for every caller; Google OAuth only provisions into the same `users`
-table.
+counters. Document analysis and email delivery run on RabbitMQ (with an in-process
+`@Async` fallback). Auth is one JWT cookie path for every caller; Google OAuth only
+provisions into the same `users` table.
 
 ```mermaid
 flowchart TB
@@ -137,6 +137,26 @@ flowchart LR
   Proc -->|failure, attempts = 3| Failed[FAILED + DLQ]
 ```
 
+### Email delivery pipeline
+
+```mermaid
+flowchart LR
+  Event["Register / resend / reset / verify / password change"] --> Outbox["email_outbox row in same DB transaction"]
+  Outbox --> Pub["EmailOutboxPublisher guarded claim"]
+  Pub --> EQ{EmailQueue}
+  EQ -->|rabbitmq| RMQ["RabbitMqEmailQueue"]
+  EQ -->|async fallback| Async["AsyncEmailQueue"]
+  RMQ --> Cons["EmailJobListener manual ACK"]
+  Async --> Deliver["EmailDeliveryService"]
+  Cons --> Deliver
+  Deliver --> Brevo["Brevo /smtp/email"]
+  Deliver --> Sent["conditional markSent - duplicate deliveries are no-ops"]
+```
+
+The unique `dedupe_key` collapses repeated requests for the same logical email. A failed
+provider call returns the row to `PENDING` for a bounded retry; exhausted rows become `FAILED`
+and the delivery goes to a dead-letter queue.
+
 More module detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
@@ -152,7 +172,7 @@ More module detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 | Storage | S3-compatible SDK (Supabase Storage prod), local filesystem for dev |
 | AI | Google Gemini (default), Anthropic optional, `none` to disable |
 | Payments | Paystack (test → live via key swap) |
-| Email | Brevo (verification + password-reset) |
+| Email | Brevo via transactional outbox + RabbitMQ (verification, reset, welcome, notifications) |
 | Observability | Actuator (health / info / prometheus); JaCoCo report (check gate not enforced yet) |
 
 ---
@@ -207,10 +227,10 @@ Password + optional Google authorization-code flow. One JWT cookie pair for all 
 ```mermaid
 flowchart TD
   Start[Sign-in] --> Local{Password?}
-  Local -->|yes| Login[POST /api/auth/login]
-  Local -->|Google| OAuth[GET /oauth2/authorization/google]
+  Local -->|yes| Login["POST /api/auth/login"]
+  Local -->|Google| OAuth["GET /oauth2/authorization/google"]
   OAuth --> Google[Google consent]
-  Google --> Callback[GET /login/oauth2/code/google]
+  Google --> Callback["GET /login/oauth2/code/google"]
   Callback --> Prov[OAuthAccountProvisioner]
   Prov --> Find[Find by Google sub]
   Prov --> Link[Link verified email to LOCAL]
@@ -219,8 +239,8 @@ flowchart TD
   Find --> Tokens
   Link --> Tokens
   Create --> Tokens
-  Tokens --> Cookies[HttpOnly access + refresh cookies]
-  Cookies --> SPA[/auth/callback?status=success]
+  Tokens --> Cookies["HttpOnly access + refresh cookies"]
+  Cookies --> SPA["/auth/callback?status=success"]
 ```
 
 - **Start:** `GET /oauth2/authorization/google`
@@ -326,7 +346,7 @@ Base path `/api`. Auth cookies are HttpOnly; CSRF via `GET /api/auth/csrf`.
 | Auth | register, login, refresh, logout, verify-email, forgot/reset-password, csrf, **providers** |
 | OAuth | `GET /oauth2/authorization/google`, `GET /login/oauth2/code/google` |
 | Profile | GET/PUT profile, password change, avatar |
-| Documents | upload / list / download / delete / analysis |
+| Documents | upload / list / report / delete / analysis |
 | Health metrics | CRUD + aggregates |
 | Subscriptions | tier, ledger, admin purchase-credits |
 | Payments | initialize, webhook, verify, history, status |
@@ -352,6 +372,8 @@ Flyway (`spring.jpa.hibernate.ddl-auto=validate`) runs versioned SQL from
 | V16 | `refresh_tokens`: single-use rotation, family replay detection, hash-only storage |
 | V17 | `documents.version` optimistic-lock column for guarded job transitions |
 | V18 | `payment_transactions.amount_cents` - USD pricing (cents, not kobo) |
+| V19 | `documents.source_file_deleted` - retriable cleanup after analysis |
+| V20 | `email_outbox` - transactional, deduplicated, retriable email queue |
 
 ### Data model (core tables)
 
@@ -472,7 +494,7 @@ GitHub Actions: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — build
 Prod profile (`SPRING_PROFILES_ACTIVE=prod`):
 
 1. Supabase Postgres **transaction pooler** (`:6543`, keep `?prepareThreshold=0`)
-2. Upstash Redis, Supabase Storage (S3 gateway; private bucket; downloads via API)
+2. Upstash Redis, Supabase Storage (S3 gateway; private bucket; uploads only, source file deleted after analysis)
 3. Render env vars from `application-prod.properties` (+ `GOOGLE_*`, `FRONTEND_URL`, `JWT_SECRET` 64+ bytes, Paystack keys)
 4. Google redirect: `https://<backend-host>/login/oauth2/code/google`
 5. Flyway on boot; health: `/actuator/health`
@@ -494,7 +516,7 @@ src/main/java/com/contentanalytics/
   entity/           User, RefreshToken, Document, Subscription, PaymentTransaction, …
   repository/       JPA + pessimistic lock / conditional claim queries
   exception/        GlobalExceptionHandler + domain errors
-src/main/resources/db/migration/   Flyway V1–V18
+src/main/resources/db/migration/   Flyway V1–V20
 src/test/java/…                    H2 suite + opt-in real-Postgres migration test
 ```
 

@@ -22,8 +22,6 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -113,15 +111,12 @@ public class AuthService {
         emailVerificationTokenRepository.save(token);
         log.debug("Email verification token created for user: {}", user.getId());
 
-        // A mail failure must never roll back a committed registration. Defer it
-        // until the transaction that created the user and token has committed.
+        // The outbox row is written in THIS transaction, so a committed user always
+        // has a committed verification email request. Provider I/O happens later.
         String email = user.getEmail();
         String displayName = user.getFirstName() != null ? user.getFirstName() : user.getUsername();
         String verificationLink = frontendUrl + "/api/auth/verify-email?token=" + verificationToken;
-        afterCommit(() -> {
-            emailService.sendEmailVerificationLink(email, displayName, verificationLink);
-            log.info("Verification email sent to: {}", email);
-        });
+        emailService.sendEmailVerificationLink(email, displayName, verificationLink);
 
         log.info("User registration complete - awaiting email verification: {}", user.getUsername());
 
@@ -179,10 +174,7 @@ public class AuthService {
 
         String email = user.getEmail();
         String displayName = user.getFirstName() != null ? user.getFirstName() : user.getUsername();
-        afterCommit(() -> {
-            emailService.sendWelcomeEmail(email, displayName);
-            log.info("Welcome email sent to: {}", email);
-        });
+        emailService.sendWelcomeEmail(email, displayName);
     }
 
     /**
@@ -217,10 +209,7 @@ public class AuthService {
         String verificationLink = frontendUrl + "/verify-email?token=" + verificationToken;
         String recipient = user.getEmail();
         String displayName = user.getFirstName() != null ? user.getFirstName() : user.getUsername();
-        afterCommit(() -> {
-            emailService.sendEmailVerificationLink(recipient, displayName, verificationLink);
-            log.info("Verification email resent to: {}", recipient);
-        });
+        emailService.sendEmailVerificationLink(recipient, displayName, verificationLink);
     }
 
     /**
@@ -253,10 +242,7 @@ public class AuthService {
         String resetLink = frontendUrl + "/reset-password?token=" + resetToken;
         String recipient = user.getEmail();
         String displayName = user.getFirstName() != null ? user.getFirstName() : user.getUsername();
-        afterCommit(() -> {
-            emailService.sendPasswordResetLink(recipient, displayName, resetLink);
-            log.info("Password reset email sent to: {}", recipient);
-        });
+        emailService.sendPasswordResetLink(recipient, displayName, resetLink);
     }
 
     /**
@@ -622,30 +608,4 @@ public class AuthService {
         user.setTokenVersion(current + 1);
     }
 
-    /**
-     * Side effects such as sending mail belong outside the database transaction:
-     * otherwise a mail failure rolls back a reset link that was already committed
-     * (or, worse, an email is sent for a transaction that later fails).
-     */
-    private void afterCommit(Runnable action) {
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    runSafely(action);
-                }
-            });
-        } else {
-            // Unit tests / non-transactional callers: behave like an immediate commit.
-            runSafely(action);
-        }
-    }
-
-    private void runSafely(Runnable action) {
-        try {
-            action.run();
-        } catch (Exception e) {
-            log.error("Post-commit action failed", e);
-        }
-    }
 }

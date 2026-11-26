@@ -70,7 +70,7 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
 
         if (userId == null) {
             log.error("OAuth2 principal carries no local user id");
-            response.sendRedirect(redirect("missing_user"));
+            response.sendRedirect(redirect("error", "missing_user"));
             return;
         }
 
@@ -97,14 +97,20 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
     }
 
     private String redirect(String status) {
+        return redirect(status, null);
+    }
+
+    private String redirect(String status, String reason) {
         String base = frontendUrl.endsWith("/")
                 ? frontendUrl.substring(0, frontendUrl.length() - 1)
                 : frontendUrl;
-        return UriComponentsBuilder.fromUriString(base)
+        UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(base)
                 .path("/auth/callback")
-                .queryParam("status", status)
-                .build(true)
-                .toUriString();
+                .queryParam("status", status);
+        if (reason != null) {
+            builder.queryParam("reason", reason);
+        }
+        return builder.build(true).toUriString();
     }
 
     private long toSeconds(long millis) {

@@ -19,7 +19,7 @@ system (see `docs/AUTHENTICATION.md`).
 |---|---|
 | `controller` | `AuthController` (register/login/refresh/logout/tokens + `GET /providers`), `ProfileController`, `DocumentController` (+ `DocumentWebSocketController`), `HealthController`, `SubscriptionController`. |
 | `service` | `AuthService` (incl. `issueTokens`, the shared mint point), `OAuthAccountProvisioner` (find/link/create), `ProfileService`, document + analysis pipeline (`AiAnalysisService` over `GeminiService`/`AnthropicAiProvider`), `EmailService` (Brevo), `ImageService`, `StorageService` (selects `local` / `s3` / `supabase` alias via `S3StorageService`), `RefreshTokenRevocationService`, queue (`AsyncJobQueue` / `RabbitMqJobQueue`). |
-| `security` | `JwtAuthenticationFilter` (per-request cookie auth), `GoogleOAuth2UserService` (verified-email gate), `OAuth2LoginSuccessHandler` / `OAuth2LoginFailureHandler` (cookies+redirect / reason vocabulary), `CookieUtil`, `TokenGenerationUtil`. `SecurityConfig` wires JWT + `oauth2Login` and the public matchers. |
+| `security` | `JwtAuthenticationFilter` (per-request cookie auth), `GoogleOAuth2UserService` / `GoogleOidcUserService` (verified-email gate for OAuth2 and OIDC), `OAuth2LoginSuccessHandler` / `OAuth2LoginFailureHandler` (cookies+redirect / reason vocabulary), `CookieUtil`, `TokenGenerationUtil`. `SecurityConfig` wires JWT + `oauth2Login` and the public matchers. |
 | `entity` / `repository` | `User` (+ `AuthProvider`: `LOCAL`/`GOOGLE`), `RefreshToken` (single-use rotation), documents, health metrics, verification/reset tokens, profiles, subscriptions/credits/audit. |
 | `exception` | `GlobalExceptionHandler` error shape; `AccountLinkingException` (409 on sub-mismatch). |
 | `config` | CORS, Jackson, async/scheduling, WebSocket, storage/queue conditionals. `PasswordConfig` holds the `PasswordEncoder` bean alone so `SecurityConfig` -> OAuth handlers -> `AuthService` -> encoder never forms a cycle. |
@@ -49,13 +49,16 @@ flowchart TB
     Redis[(Redis<br/>cache, idempotency, rate limit, lockout)]
     Storage[StorageService<br/>local / S3 / Supabase]
     HTTP[Paystack, Brevo, Gemini]
-    MQ[JobQueue: async / RabbitMQ]
+    MQ[JobQueue / EmailQueue: async / RabbitMQ]
+    Outbox[(email_outbox<br/>transactional mail queue)]
   end
   PG[(PostgreSQL)]
 
   REST --> JwtFilter --> Session --> AuthSvc & CreditSvc & DocSvc & PaySvc
   STOMP --> WSInt --> Session
   AuthSvc & CreditSvc & DocSvc & PaySvc --> JPA --> PG
+  AuthSvc --> Outbox --> PG
+  Outbox --> MQ --> HTTP
   AuthSvc --> Redis
   CreditSvc --> Redis
   DocSvc --> MQ --> Worker --> DocSvc
@@ -91,7 +94,14 @@ sequenceDiagram
 ```
 
 Analysis uploads additionally emit STOMP progress on `/ws` while the job runs
-async (or via RabbitMQ when `app.queue.type=rabbitmq`).
+on RabbitMQ by default (`app.queue.type=async` switches to the in-process fallback).
+
+Email never performs I/O inside the request transaction. `AuthService` and
+`ProfileService` write an `email_outbox` row with the same commit as the token/password
+change; `EmailOutboxPublisher` claims it with a conditional UPDATE and hands it to
+RabbitMQ. The consumer reloads the row, calls Brevo, and sets `SENT` only through another
+conditional UPDATE, so redeliveries cannot send twice. Failures return the row to
+`PENDING` up to `app.email.max-attempts`, then mark it `FAILED`.
 
 ## Data model
 
@@ -166,15 +176,16 @@ Migrations `V1`-`V10` own the tables and indexes listed above; `V12` adds the
 payment-transaction ledger (PENDING-first, idempotent via provider reference),
 `V13` drops two decorative profile columns, `V14` adds CHECK constraints, `V15`
 adds JPA `@Version` columns plus unique ledger indexes, `V16` adds the
-`refresh_tokens` rotation table, `V17` adds `documents.version`, and `V18`
-renames the payment amount column to USD cents.
+`refresh_tokens` rotation table, `V17` adds `documents.version`, `V18`
+renames the payment amount column to USD cents, `V19` tracks whether the
+source upload was removed after analysis, and `V20` adds the email outbox.
 
 ## Cross-cutting
 
 - **Config**: `application.properties` (local, plain values) <- overridden by
   `application-prod.properties` (Render env-var mapping) <- `application-test.properties`
   (self-contained H2, never reads the other two).
-- **Migrations**: Flyway `V1`-`V18`, `validate` mode everywhere - schema changes
+- **Migrations**: Flyway `V1`-`V20`, `validate` mode everywhere - schema changes
   ship as versioned SQL, never Hibernate DDL.
 - **Observability**: Actuator health/info/prometheus; `HealthCheckService` aggregates
   db/redis/storage probes for Render.

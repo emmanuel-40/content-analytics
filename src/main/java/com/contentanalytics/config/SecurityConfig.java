@@ -1,6 +1,7 @@
 package com.contentanalytics.config;
 
 import com.contentanalytics.security.GoogleOAuth2UserService;
+import com.contentanalytics.security.GoogleOidcUserService;
 import com.contentanalytics.security.JwtAuthenticationFilter;
 import com.contentanalytics.security.OAuth2LoginFailureHandler;
 import com.contentanalytics.security.OAuth2LoginSuccessHandler;
@@ -8,8 +9,6 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -18,6 +17,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
+import org.springframework.web.cors.CorsConfigurationSource;
 
 @Configuration
 @EnableWebSecurity
@@ -25,6 +25,7 @@ import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final CorsConfigurationSource corsConfigurationSource;
 
     /**
      * Google sign-in. The user service links the Google identity onto a {@code users}
@@ -32,16 +33,20 @@ public class SecurityConfig {
      * password flow issues, so nothing downstream learns that OAuth was involved.
      */
     private final GoogleOAuth2UserService googleOAuth2UserService;
+    private final GoogleOidcUserService googleOidcUserService;
     private final OAuth2LoginSuccessHandler oAuth2LoginSuccessHandler;
     private final OAuth2LoginFailureHandler oAuth2LoginFailureHandler;
 
     /**
-     * Authentication manager for processing authentication
+     * No AuthenticationManager bean is declared here on purpose.
+     *
+     * Password login verifies the password directly in AuthService, and the OAuth2
+     * login filter gets its manager from Spring Security's AuthenticationConfiguration.
+     * Exposing that same manager as an @Bean makes Spring AOP wrap it; the OAuth2
+     * callback then calls the proxy, whose target is the proxy, until the stack
+     * overflows. Nothing in the application injects this bean, so the safest fix is
+     * to let Spring Security keep its internal, unproxied instance.
      */
-    @Bean
-    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
-        return config.getAuthenticationManager();
-    }
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
@@ -53,6 +58,22 @@ public class SecurityConfig {
         csrfTokenRequestAttributeHandler.setCsrfRequestAttributeName("_csrf");
 
         http
+                // CORS must be handled by a filter BEFORE authorization. MVC-level CORS
+                // alone is too late: an OPTIONS preflight would otherwise fall through
+                // to anyRequest().authenticated(), get redirected to Google, and the
+                // browser would refuse the real API call.
+                .cors(cors -> cors.configurationSource(corsConfigurationSource))
+                // An expired/absent session on an API call must be a readable 401, not a
+                // 302 into the OAuth handshake. A browser fetch cannot follow a redirect
+                // to accounts.google.com (and should never try to), and the SPA already
+                // handles 401 by refreshing once and then sending the user to login.
+                .exceptionHandling(exceptions -> exceptions
+                        .authenticationEntryPoint((request, response, authException) -> {
+                            response.setStatus(401);
+                            response.setContentType("application/json");
+                            response.setCharacterEncoding("UTF-8");
+                            response.getWriter().write("{\"status\":401,\"message\":\"Authentication required\"}");
+                        }))
                 // CSRF Protection with secure cookie handling
                 .csrf(csrf -> csrf
                         // Use CookieCsrfTokenRepository for stateless APIs
@@ -105,6 +126,11 @@ public class SecurityConfig {
                 )
                 // Authorization rules
                 .authorizeHttpRequests(authz -> authz
+                        // Browser preflights are never authenticated requests. Spring Security's
+                        // CORS filter normally answers them before this point; permitting OPTIONS
+                        // as well keeps a misconfigured/non-preflight OPTIONS from being
+                        // redirected into the OAuth flow.
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         // Public endpoints (no auth needed)
                         .requestMatchers(HttpMethod.POST, "/api/auth/register").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
@@ -172,7 +198,8 @@ public class SecurityConfig {
                         // Link the Google identity to a users row (find-or-create by
                         // verified email) before the success handler runs.
                         .userInfoEndpoint(userInfo -> userInfo
-                                .userService(googleOAuth2UserService))
+                                .userService(googleOAuth2UserService)
+                                .oidcUserService(googleOidcUserService))
                         .successHandler(oAuth2LoginSuccessHandler)
                         .failureHandler(oAuth2LoginFailureHandler)
                 )

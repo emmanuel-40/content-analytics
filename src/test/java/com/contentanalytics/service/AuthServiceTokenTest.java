@@ -20,8 +20,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.util.ReflectionTestUtils;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -218,8 +216,8 @@ class AuthServiceTokenTest {
     }
 
     @Test
-    @DisplayName("email verification claims the token once and sends mail only after commit")
-    void verificationIsAtomicAndMailIsDeferred() {
+    @DisplayName("email verification claims the token once and queues the welcome email in the same transaction")
+    void verificationIsAtomicAndMailIsQueued() {
         user.setEmailVerified(false);
         EmailVerificationToken verification = EmailVerificationToken.builder()
                 .token("verify-123")
@@ -231,21 +229,12 @@ class AuthServiceTokenTest {
         when(emailVerificationTokenRepository.findByToken("verify-123")).thenReturn(Optional.of(verification));
         when(emailVerificationTokenRepository.claimToken(eq("verify-123"), any())).thenReturn(1);
 
-        TransactionSynchronizationManager.initSynchronization();
-        try {
-            authService.verifyEmail("verify-123");
+        authService.verifyEmail("verify-123");
 
-            verify(emailService, never()).sendWelcomeEmail(anyString(), anyString());
-            assertThat(user.getEmailVerified()).isTrue();
-            verify(emailVerificationTokenRepository).invalidateAllForUser(USER_ID);
-
-            for (TransactionSynchronization synchronization : TransactionSynchronizationManager.getSynchronizations()) {
-                synchronization.afterCommit();
-            }
-            verify(emailService).sendWelcomeEmail("oliver@example.com", "oliver");
-        } finally {
-            TransactionSynchronizationManager.clearSynchronization();
-        }
+        // The outbox row is part of the same transaction as the verification state.
+        verify(emailService).sendWelcomeEmail("oliver@example.com", "oliver");
+        assertThat(user.getEmailVerified()).isTrue();
+        verify(emailVerificationTokenRepository).invalidateAllForUser(USER_ID);
     }
 
     @Test

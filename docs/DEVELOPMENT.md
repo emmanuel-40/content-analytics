@@ -19,7 +19,7 @@ Postgres + Redis with dev-safe defaults.
 - PostgreSQL 15+ with database `content_analytics_db` (default user `postgres` /
   password `postgres`; change the three `spring.datasource.*` lines if yours differ).
 - Redis on `localhost:6379` (empty password by default).
-- Optional: local RabbitMQ (`guest`/`guest`) only if you flip `app.queue.type` to `rabbitmq`.
+- RabbitMQ on `localhost:5672` (`guest`/`guest`) — `docker compose up -d` starts it with the management UI on `15672`. Both document jobs and email delivery use it by default.
 
 ## Run
 
@@ -28,7 +28,7 @@ Postgres + Redis with dev-safe defaults.
 ./mvnw test                     # full suite, H2 in-memory, no credentials
 ```
 
-Flyway migrates `V1`-`V18` automatically; Hibernate is `validate`-only, so a
+Flyway migrates `V1`-`V20` automatically; Hibernate is `validate`-only, so a
 schema mismatch fails fast instead of silently altering tables.
 
 To see SQL while debugging, create the git-ignored
@@ -42,7 +42,7 @@ logger lines described in the `LOGGING` block of `application.properties`.
 | Postgres | `localhost:5432/content_analytics_db` | Create the DB once; Flyway owns the schema. |
 | Redis | `localhost:6379` | Cache; app degrades if down but auth sessions are JWTs, not server state. |
 | Storage | `./uploads` via `app.storage.type=local` | S3 keys stay placeholder locally; flipping to `s3` dials the real bucket. |
-| Mail | disabled (empty `app.brevo.api-key`) | Register still works; the verification link is logged, not sent. |
+| Mail | queued to `email_outbox`, delivery disabled (empty `app.brevo.api-key`) | Register still works; rows stay PENDING/FAILED until Brevo is configured. |
 | AI | `gemini` with empty key | Analysis falls back to basic; paste `app.gemini.api-key` to use real AI. |
 | Google | disabled (`local-dev-not-configured`) | `providers` reports false; paste the client id/secret + register `http://localhost:8080/login/oauth2/code/google` to try the real flow. |
 
@@ -51,8 +51,9 @@ logger lines described in the `LOGGING` block of `application.properties`.
 - **AI**: `app.ai.provider=gemini|anthropic|none`; keys paste straight into
   `application.properties` (never commit a real one - this repo is shared).
 - **Google**: see `docs/GOOGLE_OAUTH_SETUP.md` sections 2-4 (local rows).
-- **RabbitMQ**: set `app.queue.type=rabbitmq` and run a local broker to exercise
-  the queue path instead of in-process async.
+- **RabbitMQ**: enabled by default (`app.queue.type=rabbitmq`) for document jobs and
+  email delivery. Set `app.queue.type=async` to exercise the broker-free fallback;
+  tests always use async and never dial out.
 
 ## Tests
 

@@ -101,4 +101,12 @@ public class Document {
     @Column
     private Float confidenceScore; // For AI analysis confidence
 
+    /**
+     * The source file is removed as soon as analysis is durable. This flag lets a
+     * scheduled job retry any deletion that failed because of a storage outage.
+     */
+    @Builder.Default
+    @Column(nullable = false)
+    private boolean sourceFileDeleted = false;
+
 }

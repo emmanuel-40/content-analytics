@@ -14,7 +14,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * RabbitMQ topology for document processing.
+ * RabbitMQ topology for document processing and email delivery.
  *
  * Only created when {@code app.queue.type=rabbitmq}, so no connection is attempted in the
  * default in-process mode. Every queue is durable and the work queue dead-letters rejected
@@ -38,6 +38,15 @@ public class RabbitMqConfig {
 
     @Value("${app.queue.document-queue:document-processing}.dlq")
     private String deadLetterQueue;
+
+    @Value("${app.queue.email-queue:email-delivery}")
+    private String emailQueue;
+
+    @Value("${app.queue.email-routing-key:email.deliver}")
+    private String emailRoutingKey;
+
+    @Value("${app.queue.email-queue:email-delivery}.dlq")
+    private String emailDeadLetterQueue;
 
     @Bean
     public DirectExchange contentAnalyticsExchange() {
@@ -78,6 +87,34 @@ public class RabbitMqConfig {
         return BindingBuilder.bind(documentDeadLetterQueue())
                 .to(contentAnalyticsDeadLetterExchange())
                 .with(deadLetterQueue);
+    }
+
+    /** Durable email queue, with the same dead-letter policy as the document queue. */
+    @Bean
+    public Queue emailDeliveryQueue() {
+        return QueueBuilder.durable(emailQueue)
+                .deadLetterExchange(deadLetterExchange)
+                .deadLetterRoutingKey(emailDeadLetterQueue)
+                .build();
+    }
+
+    @Bean
+    public Binding emailDeliveryBinding() {
+        return BindingBuilder.bind(emailDeliveryQueue())
+                .to(contentAnalyticsExchange())
+                .with(emailRoutingKey);
+    }
+
+    @Bean
+    public Queue emailDeadLetterQueue() {
+        return QueueBuilder.durable(emailDeadLetterQueue).build();
+    }
+
+    @Bean
+    public Binding emailDeadLetterBinding() {
+        return BindingBuilder.bind(emailDeadLetterQueue())
+                .to(contentAnalyticsDeadLetterExchange())
+                .with(emailDeadLetterQueue);
     }
 
     /**

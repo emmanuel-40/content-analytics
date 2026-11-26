@@ -15,7 +15,6 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
-import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -42,7 +41,7 @@ public class DocumentService {
     private final StorageService storageService; // We'll create this next
     private final JobQueue jobQueue;
 
-    @Value("${app.max-upload-size:52428800}") // 50MB default
+    @Value("${app.max-upload-size:10485760}") // 10 MB default
     private long maxUploadSize;
 
     @Value("${app.allowed-file-types:pdf,txt,docx,pptx}")
@@ -289,43 +288,111 @@ public class DocumentService {
     }
 
     /**
-     * Load a document for download, verifying ownership.
+     * Mark the original upload as removed after successful storage deletion.
+     * Guarded by status so a stale cleanup cannot touch a document that was reopened.
+     */
+    @Transactional
+    public void markSourceFileDeleted(UUID documentId) {
+        int updated = documentRepository.markSourceFileDeleted(
+                documentId, DocumentStatus.COMPLETED, LocalDateTime.now());
+        if (updated == 0) {
+            log.warn("Source file cleanup flag not applied for document {} - status changed", documentId);
+        }
+    }
+
+    /**
+     * Build a downloadable text report from persisted analysis results.
+     *
+     * The original upload is intentionally not read: it is deleted as soon as analysis
+     * completes so the storage bucket does not grow with every document.
      *
      * @throws com.contentanalytics.exception.DocumentNotFoundException if the document
      * does not exist or is not owned by the requesting user (avoids leaking existence)
      */
-    public DownloadFileDto getDocumentForDownload(UUID documentId, UUID userId) {
-        log.debug("Preparing download for document: {} (user: {})", documentId, userId);
+    @Transactional(readOnly = true)
+    public AnalysisReportDto generateAnalysisReport(UUID documentId, UUID userId) {
+        log.debug("Building analysis report for document: {} (user: {})", documentId, userId);
 
         Document document = documentRepository.findByIdAndUserId(documentId, userId)
                 .orElseThrow(() -> {
-                    log.warn("Unauthorized download attempt for document: {} by user: {}", documentId, userId);
+                    log.warn("Unauthorized report attempt for document: {} by user: {}", documentId, userId);
                     return new DocumentNotFoundException("Document not found");
                 });
 
-        Resource resource = storageService.loadFileAsResource(document.getFileKey());
-
-        if (!resource.exists()) {
-            log.error("Storage record missing for document {} (key: {})", documentId, document.getFileKey());
-            throw new DocumentNotFoundException("Document file is no longer available");
+        if (document.getStatus() != DocumentStatus.COMPLETED) {
+            throw new IllegalArgumentException("Analysis report is available only after processing completes");
         }
 
-        // Resolve the real length defensively; fileSize is captured at upload time and may be
-        // stale if the object was replaced out-of-band.
-        long length;
-        try {
-            length = resource.contentLength();
-        } catch (java.io.IOException e) {
-            log.warn("Could not determine content length for document {}: {}", documentId, e.getMessage());
-            length = document != null && document.getFileSize() != null ? document.getFileSize() : 0L;
-        }
+        StringBuilder report = new StringBuilder();
+        report.append("CONTENT ANALYTICS REPORT\n");
+        report.append("========================\n\n");
+        report.append("Source file: ").append(valueOrNa(document.getFileName())).append('\n');
+        report.append("Completed: ").append(valueOrNa(document.getProcessingCompletedAt())).append('\n');
+        report.append("Status: ").append(valueOrNa(document.getStatus())).append("\n\n");
 
-        return DownloadFileDto.builder()
-                .resource(resource)
-                .fileName(document.getFileName())
-                .contentType(document.getMimeType())
-                .size(length)
+        report.append("SUMMARY\n");
+        report.append("-------\n");
+        report.append(document.getSummary() == null || document.getSummary().isBlank()
+                ? "No AI summary was generated for this document."
+                : document.getSummary().trim()).append("\n\n");
+
+        report.append("KEY TOPICS\n");
+        report.append("----------\n");
+        report.append(formatTopics(document.getKeyTopics())).append("\n\n");
+
+        report.append("SENTIMENT\n");
+        report.append("---------\n");
+        report.append(valueOrNa(document.getSentiment())).append("\n\n");
+
+        report.append("CONFIDENCE\n");
+        report.append("----------\n");
+        report.append(document.getConfidenceScore() == null
+                ? "N/A"
+                : Math.round(document.getConfidenceScore() * 100) + "%").append("\n\n");
+
+        report.append("STATISTICS\n");
+        report.append("----------\n");
+        report.append("Words: ").append(valueOrNa(document.getWordCount())).append('\n');
+        report.append("Characters: ").append(valueOrNa(document.getCharacterCount())).append('\n');
+        report.append("Pages: ").append(valueOrNa(document.getPageCount())).append('\n');
+
+        return AnalysisReportDto.builder()
+                .fileName(reportFileName(document.getFileName()))
+                .contentType("text/plain; charset=utf-8")
+                .content(report.toString())
                 .build();
+    }
+
+    private String valueOrNa(Object value) {
+        return value == null || String.valueOf(value).isBlank() ? "N/A" : String.valueOf(value);
+    }
+
+    private String formatTopics(String rawTopics) {
+        if (rawTopics == null || rawTopics.isBlank()) {
+            return "N/A";
+        }
+
+        String topics = rawTopics.trim();
+        if (topics.length() >= 2 && topics.startsWith("[") && topics.endsWith("]")) {
+            topics = topics.substring(1, topics.length() - 1).replace('"', ' ');
+        }
+        return topics.isBlank() ? "N/A" : topics.trim();
+    }
+
+    private String reportFileName(String originalFileName) {
+        String base = originalFileName == null || originalFileName.isBlank()
+                ? "document"
+                : originalFileName.trim();
+
+        int lastDot = base.lastIndexOf('.');
+        if (lastDot > 0) {
+            base = base.substring(0, lastDot);
+        }
+        base = base.replaceAll("[^a-zA-Z0-9._ -]+", "_");
+        if (base.isBlank()) {
+            base = "document";
+        }
+        return base + "-analysis.txt";
     }
 
     /**

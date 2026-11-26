@@ -72,6 +72,11 @@ public class IdempotencyAspect {
                             Object result;
                             try {
                                 result = joinPoint.proceed();
+                            } catch (RuntimeException t) {
+                                // Keep the original type so GlobalExceptionHandler can
+                                // turn a provider/configuration error into an actionable
+                                // response instead of a generic 500.
+                                throw t;
                             } catch (Throwable t) {
                                 throw new RuntimeException(t);
                             }

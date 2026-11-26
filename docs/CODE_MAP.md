@@ -1,11 +1,11 @@
 # Backend code map
 
 This is a plain-English inventory of the current backend working tree, including
-the uncommitted V16-V18 migrations and refresh-token/document-concurrency code.
+the V16-V19 migrations and refresh-token/document-concurrency code.
 It is meant to answer "what does each file actually do?" without opening every
 file.
 
-Counts: **149 main Java files**, **22 test Java files**, **18 Flyway migrations**,
+Counts: **159 main Java files**, **29 test Java files**, **20 Flyway migrations**,
 3 Spring property files, 7 docs, 1 CI workflow, 2 Compose files, 1 Dockerfile.
 
 ---
@@ -17,7 +17,7 @@ Browser
   -> AuthController / DocumentController / PaymentController / ProfileController
   -> Security filter chain (JWT or Google OAuth cookie -> principal = userId)
   -> Services (business rules, DB transactions, provider calls)
-  -> Repositories -> Postgres (Flyway V1-V18 owns the schema)
+  -> Repositories -> Postgres (Flyway V1-V20 owns the schema)
   -> Redis (optional: rate limits, idempotency, login lockout)
   -> RabbitMQ or in-process @Async (document jobs)
   -> WebSocket STOMP /ws (job progress pushed to the browser)
@@ -73,7 +73,7 @@ Important rules baked into the code:
 | File | What it does |
 |---|---|
 | `controller/AuthController.java` | Register, login, refresh, logout, verify email, reset password, providers, CSRF/current user. |
-| `controller/DocumentController.java` | Upload/list/get/search/download/delete documents and expose stats. |
+| `controller/DocumentController.java` | Upload/list/get/search/report/delete documents and expose stats. |
 | `controller/DocumentWebSocketController.java` | STOMP destination handling for document progress/complete/failure messages. |
 | `controller/HealthController.java` | Rich health payload (DB, Redis, disk, app metadata). |
 | `controller/PaymentController.java` | `/api/payments/{initialize,webhook,verify,history,status}`; USD packs, HMAC webhook, browser reconcile. |
@@ -109,7 +109,7 @@ Important rules baked into the code:
 | `dto/DocumentSearchFilterDto.java` | Search/filter/pagination parameters. |
 | `dto/DocumentStatsDto.java` | Counts and aggregate document statistics. |
 | `dto/DocumentStatusDto.java` | Status/progress snapshot used by polling/websocket clients. |
-| `dto/DownloadFileDto.java` | Signed download URL + file metadata. |
+| `dto/AnalysisReportDto.java` | Generated text report built from saved analysis results. |
 | `dto/PaginationResponseDto.java` | Generic page envelope used by document listing. |
 
 ### Payments and credits
@@ -206,10 +206,13 @@ Important rules baked into the code:
 | `security/JwtTokenProvider.java` | Creates/parses access + refresh JWTs, checks `token_version` and session validity. |
 | `security/JwtAuthenticationFilter.java` | Reads the access-token cookie/header, validates it and sets the principal to the userId. |
 | `security/TokenSessionValidator.java` | Single source of truth for "is this token still allowed?" used by REST and WebSocket. |
-| `security/GoogleOAuth2UserService.java` | Loads/maps Google profile info and links or provisions the local user. |
+| `security/GoogleOAuth2UserService.java` | Loads/maps plain OAuth2 Google profile info and links or provisions the local user. |
+| `security/GoogleOidcUserService.java` | Same policy for Google's default `openid` path; stamps our local user id on the OIDC principal. |
 | `security/OAuth2LoginSuccessHandler.java` | Issues app tokens after Google login and redirects to the SPA callback. |
 | `security/OAuth2LoginFailureHandler.java` | Redirects failed OAuth logins with a safe error. |
 | `scheduler/TokenCleanupScheduler.java` | Periodically deletes expired verification/reset/refresh tokens. |
+| `scheduler/DocumentSourceCleanupScheduler.java` | Retries source-file deletion for completed documents when the immediate cleanup failed. |
+| `scheduler/EmailOutboxPublisher.java` | Claims committed outbox rows and hands them to the configured email queue. |
 
 ## 10. Services
 
@@ -221,7 +224,13 @@ Important rules baked into the code:
 | `service/RefreshTokenRevocationService.java` | Atomic rotate/revoke helpers for refresh-token families. |
 | `service/LoginAttemptService.java` | Redis-backed failed-attempt counter and hard lockout (DB/fallback when Redis is down). |
 | `service/OAuthAccountProvisioner.java` | Creates/links Google-backed users with deduplicated usernames. |
-| `service/EmailService.java` | Brevo-backed verification/reset/welcome mail. |
+| `service/EmailService.java` | Builds mail templates and writes deduplicated outbox rows in the caller's transaction; performs no I/O. |
+| `service/EmailQueue.java` | Mail transport contract plus the small job reference carried through RabbitMQ/async. |
+| `service/RabbitMqEmailQueue.java` | Durable email publisher with in-process fallback if the broker is down. |
+| `service/AsyncEmailQueue.java` | Broker-free email transport used by tests and the fallback path. |
+| `service/EmailDeliveryService.java` | The only Brevo caller; reloads the outbox row, marks SENT conditionally and records failures. |
+| `service/EmailJobListener.java` | RabbitMQ email consumer with manual ACK/NACK and dead-lettering. |
+| `entity/EmailOutbox.java` / `entity/EmailType.java` / `repository/EmailOutboxRepository.java` | Transactional mail queue, types and guarded status transitions. |
 | `service/GravatarService.java` | Fallback avatar derivation from email where used. |
 | `service/AuditService.java` | Writes structured audit log rows. |
 
@@ -239,8 +248,8 @@ Important rules baked into the code:
 
 | File | What it does |
 |---|---|
-| `service/DocumentService.java` | Upload metadata, ownership checks, guarded processing claim, delete/download. |
-| `service/DocumentProcessingService.java` | Runs extraction + AI analysis and emits progress updates. |
+| `service/DocumentService.java` | Upload metadata, ownership checks, guarded processing claim, delete and report generation. |
+| `service/DocumentProcessingService.java` | Runs extraction + AI analysis, caps stored text, deletes the source file after completion and emits progress updates. |
 | `service/DocumentJobListener.java` | RabbitMQ consumer: acknowledges, retries with bound, dead-letters exhausted jobs. |
 | `service/JobQueue.java` | Queue abstraction used by document upload. |
 | `service/AsyncJobQueue.java` | In-process `@Async` fallback queue (test/local and broker-down path). |
@@ -275,7 +284,7 @@ Important rules baked into the code:
 
 ---
 
-## 12. Flyway migrations V1-V18
+## 12. Flyway migrations V1-V20
 
 | File | What it does |
 |---|---|
@@ -297,6 +306,8 @@ Important rules baked into the code:
 | `V16__Refresh_Token_Rotation.sql` | Hashed, single-use refresh-token family table. |
 | `V17__Document_Job_Concurrency.sql` | `documents.version` for guarded duplicate job claims. |
 | `V18__Payments_Use_Usd_Cents.sql` | Renames `amount_kobo` to `amount_cents`, converts packs to USD cents. |
+| `V19__Document_Source_File_Cleanup.sql` | Adds `documents.source_file_deleted` for retriable source-file cleanup. |
+| `V20__Email_Outbox.sql` | Adds `email_outbox` with a unique dedupe key and guarded status transitions. |
 
 ## 13. Configuration files
 
@@ -305,13 +316,13 @@ Important rules baked into the code:
 | `application.properties` | Local/default config: H2 or local DB, local Redis/queue flags, local secrets kept out of git history. |
 | `application-local.properties` | Developer-specific overrides (ignored from version control in deployment docs). |
 | `application-test.properties` | H2 in-memory test profile; disables external providers, uses async queue. |
-| `application-prod.properties` | Render profile: Postgres pooler, Upstash Redis, JWT, OAuth, Gemini, Brevo, Paystack, CORS/WebSocket, Supabase S3. |
+| `application-prod.properties` | Render profile: Postgres pooler, Upstash Redis, CloudAMQP, JWT, OAuth, Gemini, Brevo, Paystack, CORS/WebSocket, Supabase S3. |
 
 ## 14. Tests
 
 | File | What it verifies |
 |---|---|
-| `FlywayMigrationTest.java` | Opt-in Testcontainers test applying V1-V18 to real Postgres (`RUN_POSTGRES_TESTS=true`). |
+| `FlywayMigrationTest.java` | Opt-in Testcontainers test applying V1-V20 to real Postgres (`RUN_POSTGRES_TESTS=true`). |
 | `ProfilePictureIntegrationTest.java` | Avatar upload/delete/signed URL flow. |
 | `entity/SubscriptionTest.java` | Subscription allowance/tier behaviour. |
 | `security/GoogleOAuthIntegrationTest.java` | Google sign-up/link/reject-steal behaviour. |
@@ -328,6 +339,13 @@ Important rules baked into the code:
 | `service/LoginAttemptServiceTest.java` | Lockout and reset behaviour. |
 | `service/DocumentJobConcurrencyTest.java` | Duplicate job delivery is a no-op. |
 | `service/DocumentJobListenerTest.java` | Retry and dead-letter transitions. |
+| `service/DocumentProcessingServiceTest.java` | Source-file deletion, stored-text cap and failure retention. |
+| `service/DocumentReportTest.java` | Report content, ownership and completion guard. |
+| `scheduler/DocumentSourceCleanupSchedulerTest.java` | Leftover source-file retry and failure flag guard. |
+| `service/EmailOutboxTest.java` | Duplicate suppression, guarded publish/send transitions and retry cap on H2. |
+| `service/EmailDeliveryServiceTest.java` | SENT rows are never re-delivered; failures stay retryable. |
+| `service/EmailJobListenerTest.java` | Manual ACK/NACK for the email consumer. |
+| `scheduler/EmailOutboxPublisherTest.java` | Conditional claim prevents concurrent double publishing. |
 | `service/StorageServiceBackendSelectionTest.java` | Local vs S3 backend selection. |
 | `service/StorageServiceTest.java` | Save/delete and path-traversal rejection. |
 | `service/WebSocketServiceTest.java` | Progress/completion/failure message contents. |

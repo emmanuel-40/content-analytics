@@ -175,4 +175,41 @@ public interface DocumentRepository extends JpaRepository<Document, UUID> {
     WHERE user_id = ?1
 """, nativeQuery = true)
     Object[] getUserDocumentStats(UUID userId);
+
+    /**
+     * Completed documents whose source file may still exist in storage. The worker
+     * normally deletes it immediately; this query is the retry path for that cleanup.
+     */
+    @Query("""
+            SELECT d FROM Document d
+             WHERE d.status = :status
+               AND d.sourceFileDeleted = FALSE
+               AND d.processingCompletedAt < :cutoff
+             ORDER BY d.processingCompletedAt ASC
+            """)
+    List<Document> findSourceCleanupCandidates(
+            @Param("status") DocumentStatus status,
+            @Param("cutoff") LocalDateTime cutoff,
+            Pageable pageable);
+
+    /**
+     * Mark a source file as removed. Guarded by COMPLETED so a stale cleanup cannot
+     * change a document that was reopened or deleted.
+     *
+     * @return number of rows updated (0 means the document is no longer eligible)
+     */
+    @Modifying(flushAutomatically = true)
+    @Transactional
+    @Query("""
+            UPDATE Document d
+               SET d.sourceFileDeleted = TRUE,
+                   d.updatedAt = :updatedAt
+             WHERE d.id = :documentId
+               AND d.status = :status
+               AND d.sourceFileDeleted = FALSE
+            """)
+    int markSourceFileDeleted(
+            @Param("documentId") UUID documentId,
+            @Param("status") DocumentStatus status,
+            @Param("updatedAt") LocalDateTime updatedAt);
 }

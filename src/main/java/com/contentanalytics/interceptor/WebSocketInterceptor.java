@@ -11,6 +11,7 @@ import org.springframework.messaging.simp.stomp.StompCommand;
 import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 
@@ -31,6 +32,7 @@ public class WebSocketInterceptor implements ChannelInterceptor {
 
     public static final String USER_ID_SESSION_KEY = "userId";
     public static final String USERNAME_SESSION_KEY = "username";
+    private static final String PRINCIPAL_SESSION_KEY = "wsPrincipal";
 
     private static final String TRACK_DESTINATION_PREFIX = "/topic/documents/track/";
     private static final String USER_DESTINATION_PREFIX = "/user/";
@@ -41,20 +43,29 @@ public class WebSocketInterceptor implements ChannelInterceptor {
 
     @Override
     public Message<?> preSend(Message<?> message, MessageChannel channel) {
-        StompHeaderAccessor accessor = StompHeaderAccessor.wrap(message);
+        // Use the original accessor, not a wrapped copy: StompSubProtocolHandler installs a
+        // user-change callback on it. Calling setUser below notifies SimpUserRegistry so
+        // convertAndSendToUser can resolve /user/{userId}/queue/documents to this session.
+        StompHeaderAccessor originalAccessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+        boolean copyRequired = originalAccessor == null;
+        StompHeaderAccessor accessor = copyRequired ? StompHeaderAccessor.wrap(message) : originalAccessor;
 
         if (StompCommand.CONNECT.equals(accessor.getCommand())) {
             authenticateConnection(accessor);
-            // Return a new message so the Principal/session attributes reach the broker and
-            // @MessageMapping methods; mutating a wrapped accessor alone is not enough.
-            return MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders());
+        } else if (accessor.getUser() == null && accessor.getSessionAttributes() != null
+                && accessor.getSessionAttributes().get(PRINCIPAL_SESSION_KEY) instanceof WebSocketPrincipal storedPrincipal) {
+            // Defensive fallback for transports that do not replay the Principal. The normal
+            // STOMP path already carries it once the CONNECT callback has been invoked.
+            accessor.setUser(storedPrincipal);
         }
 
         if (StompCommand.SUBSCRIBE.equals(accessor.getCommand())) {
             authorizeSubscription(accessor);
         }
 
-        return message;
+        return copyRequired
+                ? MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders())
+                : message;
     }
 
     /**
@@ -89,6 +100,8 @@ public class WebSocketInterceptor implements ChannelInterceptor {
         }
 
         WebSocketPrincipal principal = new WebSocketPrincipal(userId, username);
+        // This also invokes the user-change callback installed by StompSubProtocolHandler,
+        // registering the Principal for subsequent frames and user destinations.
         accessor.setUser(principal);
 
         Map<String, Object> sessionAttributes = accessor.getSessionAttributes();
@@ -99,6 +112,7 @@ public class WebSocketInterceptor implements ChannelInterceptor {
         // Always stored as String: user destinations and @MessageMapping handlers use String ids.
         sessionAttributes.put(USER_ID_SESSION_KEY, userId.toString());
         sessionAttributes.put(USERNAME_SESSION_KEY, username);
+        sessionAttributes.put(PRINCIPAL_SESSION_KEY, principal);
 
         log.info("WebSocket authenticated for user: {}", username);
     }

@@ -34,7 +34,7 @@ public class Document {
     @Column(nullable = false)
     private Long fileSize; // in bytes
 
-    @Column(nullable = false, length = 50)
+    @Column(nullable = false, length = 255)
     private String mimeType; // application/pdf, text/plain, etc.
 
     @Column(nullable = false)

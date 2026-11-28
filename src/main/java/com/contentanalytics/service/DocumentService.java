@@ -112,7 +112,18 @@ public class DocumentService {
                 .updatedAt(LocalDateTime.now())
                 .build();
 
-        document = documentRepository.save(document);
+        try {
+            document = documentRepository.save(document);
+        } catch (RuntimeException e) {
+            // Storage happens before the DB insert commits. If the insert fails, do not leave
+            // an orphaned object behind. Never mask the original persistence exception.
+            try {
+                storageService.deleteFile(fileKey);
+            } catch (RuntimeException cleanupError) {
+                log.warn("Failed to remove orphaned upload after DB insert failure: {}", fileKey, cleanupError);
+            }
+            throw e;
+        }
         log.info("Document created with ID: {} for user: {}", document.getId(), userId);
 
         // Queue only after the INSERT is committed, otherwise a worker can claim a
@@ -643,6 +654,8 @@ public class DocumentService {
                 .processingProgress(document.getProcessingProgress())
                 .sentiment(document.getSentiment())
                 .wordCount(document.getWordCount())
+                .summary(document.getSummary())
+                .processingError(document.getProcessingError())
                 .createdAt(document.getCreatedAt())
                 .processingCompletedAt(document.getProcessingCompletedAt())
                 .build();

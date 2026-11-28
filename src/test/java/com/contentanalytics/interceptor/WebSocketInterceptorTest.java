@@ -20,6 +20,7 @@ import org.springframework.security.access.AccessDeniedException;
 import java.security.Principal;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -45,7 +46,17 @@ class WebSocketInterceptorTest {
     private final MessageChannel channel = mock(MessageChannel.class);
 
     private Message<byte[]> connectMessage(String token) {
+        return connectMessage(token, null);
+    }
+
+    private Message<byte[]> connectMessage(String token, java.util.function.Consumer<Principal> userChangeCallback) {
         StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.CONNECT);
+        // Production keeps the frame mutable until the last inbound interceptor freezes it;
+        // mirror that here so the original accessor (and its callback) survives.
+        accessor.setLeaveMutable(true);
+        if (userChangeCallback != null) {
+            accessor.setUserChangeCallback(userChangeCallback);
+        }
         if (token != null) {
             accessor.setNativeHeader("Authorization", "Bearer " + token);
         }
@@ -54,6 +65,7 @@ class WebSocketInterceptorTest {
 
     private Message<byte[]> subscribeMessage(String destination, Principal user) {
         StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.SUBSCRIBE);
+        accessor.setLeaveMutable(true);
         accessor.setDestination(destination);
         accessor.setUser(user);
         return MessageBuilder.createMessage(new byte[0], accessor.getMessageHeaders());
@@ -80,6 +92,21 @@ class WebSocketInterceptorTest {
         assertThat(headers.getSessionAttributes())
                 .containsEntry(WebSocketInterceptor.USER_ID_SESSION_KEY, userId.toString())
                 .containsEntry(WebSocketInterceptor.USERNAME_SESSION_KEY, "alice");
+    }
+
+    @Test
+    @DisplayName("CONNECT notifies the user-change callback used by SimpUserRegistry")
+    void connectNotifiesUserChangeCallback() {
+        UUID userId = UUID.randomUUID();
+        when(tokenSessionValidator.isValidSession("token")).thenReturn(true);
+        when(jwtTokenProvider.getUserIdFromToken("token")).thenReturn(userId);
+        when(jwtTokenProvider.getUsernameFromToken("token")).thenReturn("alice");
+        AtomicReference<Principal> notified = new AtomicReference<>();
+
+        interceptor.preSend(connectMessage("token", notified::set), channel);
+
+        assertThat(notified.get()).isInstanceOf(WebSocketInterceptor.WebSocketPrincipal.class);
+        assertThat(notified.get().getName()).isEqualTo(userId.toString());
     }
 
     @Test

@@ -8,8 +8,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,8 +37,15 @@ public class GeminiService implements AiProvider {
     @Value("${app.gemini.api-url:https://generativelanguage.googleapis.com/v1beta}")
     private String apiUrl;
 
-    @Value("${app.gemini.model:gemini-2.5-flash}")
+    @Value("${app.gemini.model:gemini-3.8-flash}")
     private String model;
+
+    /**
+     * Free-tier fallbacks for temporary model unavailability (for example a 503 during
+     * high demand). The primary model is always tried first.
+     */
+    @Value("${app.gemini.fallback-models:gemini-3.5-flash-lite}")
+    private String fallbackModels;
 
     @Value("${app.gemini.max-tokens:2048}")
     private int maxTokens;
@@ -68,12 +79,54 @@ public class GeminiService implements AiProvider {
             return null;
         }
 
-        try {
-            return parseResponse(callGeminiApi(buildPrompt(documentText)));
-        } catch (Exception e) {
-            log.error("Gemini analysis failed", e);
-            return null;
+        String prompt = buildPrompt(documentText);
+        Exception lastFailure = null;
+
+        for (String candidate : candidateModels()) {
+            try {
+                DocumentAnalysisResult result = parseResponse(callGeminiApi(prompt, candidate));
+                if (result != null) {
+                    return result;
+                }
+                lastFailure = new IllegalStateException("Gemini response could not be parsed");
+            } catch (Exception e) {
+                lastFailure = e;
+                if (isTemporaryModelFailure(e)) {
+                    log.warn("Gemini model {} unavailable ({}); trying fallback", candidate, e.getMessage());
+                    continue;
+                }
+                log.error("Gemini analysis failed for model {}", candidate, e);
+                return null;
+            }
         }
+
+        log.error("Gemini analysis failed for all configured models", lastFailure);
+        return null;
+    }
+
+    /** Primary model first, then configured fallbacks, with duplicates removed. */
+    private List<String> candidateModels() {
+        LinkedHashSet<String> candidates = new LinkedHashSet<>();
+        if (model != null && !model.isBlank()) {
+            candidates.add(model.trim());
+        }
+        if (fallbackModels != null && !fallbackModels.isBlank()) {
+            Arrays.stream(fallbackModels.split(","))
+                    .map(String::trim)
+                    .filter(value -> !value.isEmpty())
+                    .forEach(candidates::add);
+        }
+        return new ArrayList<>(candidates);
+    }
+
+    /**
+     * Model removal and capacity spikes should not lose the analysis: fall through to the
+     * next free model. Authentication/quota/parsing errors are not fixed by another model.
+     */
+    private boolean isTemporaryModelFailure(Exception error) {
+        String message = error.getMessage() == null ? "" : error.getMessage();
+        return Stream.of(" 404", " 408", " 429", " 500", " 502", " 503", " 504")
+                .anyMatch(message::contains);
     }
 
     /**
@@ -103,7 +156,7 @@ public class GeminiService implements AiProvider {
                 """.formatted(truncated);
     }
 
-    private String callGeminiApi(String prompt) throws java.io.IOException {
+    private String callGeminiApi(String prompt, String candidateModel) throws java.io.IOException {
         Map<String, Object> body = Map.of(
                 "contents", List.of(Map.of(
                         "parts", List.of(Map.of("text", prompt))
@@ -117,7 +170,7 @@ public class GeminiService implements AiProvider {
         String jsonBody = objectMapper.writeValueAsString(body);
 
         Request request = new Request.Builder()
-                .url(apiUrl + "/models/" + model + ":generateContent?key=" + apiKey)
+                .url(apiUrl + "/models/" + candidateModel + ":generateContent?key=" + apiKey)
                 .header("Content-Type", "application/json")
                 .post(RequestBody.create(jsonBody, MediaType.parse("application/json")))
                 .build();

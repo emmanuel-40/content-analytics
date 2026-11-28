@@ -23,6 +23,9 @@ public class DocumentListItemDto {
     private Float processingProgress;
     private String sentiment;
     private Integer wordCount;
+    /** Short analysis preview so the library can show results without opening each document. */
+    private String summary;
+    private String processingError;
     private LocalDateTime createdAt;
     private LocalDateTime processingCompletedAt;
 

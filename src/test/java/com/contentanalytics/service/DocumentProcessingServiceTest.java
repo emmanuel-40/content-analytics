@@ -96,4 +96,74 @@ class DocumentProcessingServiceTest {
                 eq(userId), eq(documentId), eq("source.pdf"), anyString(), eq("PROCESSING_ERROR"));
     }
 
+    @Test
+    @DisplayName("AI failure produces an extractive summary and does not debit credits")
+    void aiFailureProducesExtractiveSummaryWithoutCharge() {
+        UUID documentId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        String fileKey = userId + "/source.docx";
+        String extractedText = "Solar power reduces emissions. Battery storage improves reliability.";
+
+        when(documentService.claimForProcessing(documentId)).thenReturn(
+                new ClaimedDocument(documentId, userId, "source.docx", fileKey,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
+        when(fileExtractionService.extractText(fileKey,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+                .thenReturn(extractedText);
+        when(aiAnalysisService.isEnabled()).thenReturn(true);
+        when(creditService.hasAvailableCredits(userId, 1)).thenReturn(true);
+        when(aiAnalysisService.analyze(extractedText)).thenReturn(null);
+        when(documentService.updateProcessingStatus(documentId, DocumentStatus.PROCESSING, 30f, null))
+                .thenReturn(true);
+        when(documentService.updateProcessingStatus(documentId, DocumentStatus.PROCESSING, 70f, null))
+                .thenReturn(true);
+        when(documentService.completeProcessing(eq(documentId), any(ProcessedDocument.class)))
+                .thenReturn(true);
+
+        assertThat(processingService.processJob(new DocumentJob(jobId, documentId, userId, 1)))
+                .isEqualTo(DocumentProcessingService.JobOutcome.COMPLETED);
+
+        ArgumentCaptor<ProcessedDocument> resultCaptor = ArgumentCaptor.forClass(ProcessedDocument.class);
+        verify(documentService).completeProcessing(eq(documentId), resultCaptor.capture());
+        assertThat(resultCaptor.getValue().summary())
+                .contains("Extractive summary from document text:")
+                .contains("Solar power reduces emissions");
+        verify(creditService, never()).consumeCredits(eq(userId), eq(1), eq(documentId));
+    }
+
+    @Test
+    @DisplayName("AI result is charged only after a usable summary exists")
+    void successfulAiResultIsCharged() {
+        UUID documentId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        String fileKey = userId + "/source.pdf";
+        String extractedText = "Wind power is growing quickly.";
+        DocumentAnalysisResult aiResult = DocumentAnalysisResult.builder()
+                .summary("AI generated summary")
+                .build();
+
+        when(documentService.claimForProcessing(documentId)).thenReturn(
+                new ClaimedDocument(documentId, userId, "source.pdf", fileKey, "application/pdf"));
+        when(fileExtractionService.extractText(fileKey, "application/pdf")).thenReturn(extractedText);
+        when(aiAnalysisService.isEnabled()).thenReturn(true);
+        when(creditService.hasAvailableCredits(userId, 1)).thenReturn(true);
+        when(aiAnalysisService.analyze(extractedText)).thenReturn(aiResult);
+        when(documentService.updateProcessingStatus(documentId, DocumentStatus.PROCESSING, 30f, null))
+                .thenReturn(true);
+        when(documentService.updateProcessingStatus(documentId, DocumentStatus.PROCESSING, 70f, null))
+                .thenReturn(true);
+        when(documentService.completeProcessing(eq(documentId), any(ProcessedDocument.class)))
+                .thenReturn(true);
+
+        assertThat(processingService.processJob(new DocumentJob(jobId, documentId, userId, 1)))
+                .isEqualTo(DocumentProcessingService.JobOutcome.COMPLETED);
+
+        verify(creditService).consumeCredits(userId, 1, documentId);
+        ArgumentCaptor<ProcessedDocument> resultCaptor = ArgumentCaptor.forClass(ProcessedDocument.class);
+        verify(documentService).completeProcessing(eq(documentId), resultCaptor.capture());
+        assertThat(resultCaptor.getValue().summary()).isEqualTo("AI generated summary");
+    }
+
 }

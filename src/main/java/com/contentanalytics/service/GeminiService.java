@@ -124,9 +124,18 @@ public class GeminiService implements AiProvider {
      * next free model. Authentication/quota/parsing errors are not fixed by another model.
      */
     private boolean isTemporaryModelFailure(Exception error) {
-        String message = error.getMessage() == null ? "" : error.getMessage();
-        return Stream.of(" 404", " 408", " 429", " 500", " 502", " 503", " 504")
-                .anyMatch(message::contains);
+        if (error instanceof java.net.SocketTimeoutException
+                || error instanceof java.io.InterruptedIOException
+                || error instanceof java.util.concurrent.TimeoutException) {
+            return true;
+        }
+        String message = error.getMessage() == null
+                ? ""
+                : error.getMessage().toLowerCase(java.util.Locale.ROOT);
+        return message.contains("timeout")
+                || message.contains("timed out")
+                || Stream.of(" 404", " 408", " 429", " 500", " 502", " 503", " 504")
+                        .anyMatch(message::contains);
     }
 
     /**

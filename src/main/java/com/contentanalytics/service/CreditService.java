@@ -299,6 +299,19 @@ public class CreditService {
     }
 
     /**
+     * Cheap pre-flight check before sending document text to a paid provider. This is not an
+     * authorization decision: consumeCredits re-checks under a row lock and remains the
+     * authoritative debit.
+     */
+    @Transactional
+    public boolean hasAvailableCredits(UUID userId, int amount) {
+        if (amount <= 0) {
+            return true;
+        }
+        return getSubscription(userId).getAvailableCredits() >= amount;
+    }
+
+    /**
      * Paged credit ledger for a user, newest first.
      */
     @Transactional(readOnly = true)

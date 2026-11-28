@@ -125,20 +125,39 @@ public class DocumentProcessingService {
             int wordCount = countWords(extractedText);
             int charCount = extractedText.length();
 
-            // AI analysis is optional; basic analysis always succeeds. Credits are charged
-            // idempotently per document, so a retry after a failed AI call is not double-billed.
+            // AI analysis is optional. Check credits before sending document text, but only
+            // debit after a usable result exists so a provider outage never costs the user a
+            // credit. consumeCredits remains idempotent per document for bounded retries.
             DocumentAnalysisResult analysis = null;
             if (aiAnalysisService.isEnabled()) {
-                try {
-                    creditService.consumeCredits(document.userId(), AI_ANALYSIS_CREDIT_COST, documentId);
-                    analysis = aiAnalysisService.analyze(extractedText);
-                } catch (InsufficientCreditsException e) {
-                    log.warn("No credits available for document {}, continuing with basic analysis: {}",
-                            documentId, e.getMessage());
-                } catch (Exception e) {
-                    log.warn("AI analysis failed for document {}, continuing with basic analysis: {}",
-                            documentId, e.getMessage());
+                if (!creditService.hasAvailableCredits(document.userId(), AI_ANALYSIS_CREDIT_COST)) {
+                    log.warn("No credits available for document {}, using extractive summary", documentId);
+                } else {
+                    try {
+                        DocumentAnalysisResult proposed = aiAnalysisService.analyze(extractedText);
+                        if (proposed != null && proposed.getSummary() != null
+                                && !proposed.getSummary().isBlank()) {
+                            creditService.consumeCredits(
+                                    document.userId(), AI_ANALYSIS_CREDIT_COST, documentId);
+                            analysis = proposed;
+                        } else {
+                            log.warn("AI analysis returned no usable result for document {}, "
+                                    + "using extractive summary", documentId);
+                        }
+                    } catch (InsufficientCreditsException e) {
+                        log.warn("No credits available for document {}, using extractive summary: {}",
+                                documentId, e.getMessage());
+                    } catch (Exception e) {
+                        log.warn("AI analysis failed for document {}, using extractive summary: {}",
+                                documentId, e.getMessage());
+                    }
                 }
+            }
+
+            if (analysis == null) {
+                analysis = DocumentAnalysisResult.builder()
+                        .summary(BasicAnalysisSummary.fromExtractedText(extractedText))
+                        .build();
             }
 
             requireTransition(documentService.updateProcessingStatus(
